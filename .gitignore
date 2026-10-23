@@ -1,0 +1,9 @@
+# Rust
+/target/
+
+# archives
+*.zip
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,18 @@
+[package]
+name = "hl2box-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI over hl2box-core for the Android launcher and other native embedders"
+
+[lib]
+name = "hl2box"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+hl2box-core = { path = "../hl2box-core" }
+serde_json = "1"
+
+[features]
+default = ["net"]
+net = ["hl2box-core/net"]

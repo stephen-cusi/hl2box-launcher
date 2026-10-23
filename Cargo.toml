@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hl2box-core",
+    "crates/hl2box-launcher",
+    "crates/hl2box-ffi",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+opt-level = 2

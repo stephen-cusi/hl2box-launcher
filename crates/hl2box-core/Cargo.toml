@@ -1,0 +1,17 @@
+[package]
+name = "hl2box-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared logic for the hl2box launcher: identity, addons, mounts, launch arguments"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rand = "0.9"
+native-tls = { version = "0.2", optional = true }
+
+[features]
+default = ["net"]
+net = ["dep:native-tls"]
