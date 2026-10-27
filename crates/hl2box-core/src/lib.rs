@@ -20,6 +20,7 @@ pub mod gameinfo;
 pub mod gma;
 pub mod identity;
 pub mod launch;
+pub mod crashdump;
 pub mod logs;
 pub mod maps;
 pub mod search;

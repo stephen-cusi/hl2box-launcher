@@ -461,7 +461,8 @@ impl App {
     }
 
     fn reload_logs(&mut self) {
-        logview::load(&mut self.logs, self.log_sources.get(self.log_pick));
+        let engine = self.paths().engine_root;
+        logview::load(&mut self.logs, self.log_sources.get(self.log_pick), &engine);
         self.log_reload_at = self.now;
     }
 
@@ -1840,25 +1841,73 @@ impl App {
             .iter()
             .map(|s| (self.log_source_title(s), s.path.clone(), s.path.is_file()))
             .collect();
+        let dirs = [
+            self.paths().engine_root.join("hl2sb").join("bin"),
+            self.paths().engine_root.join("bin"),
+        ]
+        .iter()
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("   ");
         let labels = LogLabels {
+            crash: crate::logview::CrashLabels {
+                thread: self.tl("crash.thread"),
+                address: self.tl("crash.address"),
+                params: self.tl("crash.params"),
+                modules: self.tl("crash.modules"),
+                pdb_dirs: self.tl("crash.pdb_dirs"),
+                pdb_loaded: self.tl("crash.pdb_loaded"),
+                pdb_missing: self.tl("crash.pdb_missing"),
+                pdb_mismatch: self.tl("crash.pdb_mismatch"),
+                pdb_unreadable: self.tl("crash.pdb_unreadable"),
+                pdb_noid: self.tl("crash.pdb_noid"),
+                pdb_not_loaded: self.tl("crash.pdb_not_loaded"),
+                loading: self.tl("crash.loading"),
+                fault: self.tl("crash.fault"),
+                registers: self.tl("crash.registers"),
+                frames: self.tl("crash.frames"),
+                no_frames: self.tl("crash.no_frames"),
+                notes: self.tl("crash.notes"),
+                toggle_report: self.tl("crash.toggle_report"),
+                toggle_strings: self.tl("crash.toggle_strings"),
+                error: self.tl("crash.error"),
+                no_exception: self.tl("crash.no_exception"),
+                dir_list: dirs,
+            },
             title: self.tl("logs.title"),
             auto: self.tl("logs.auto"),
             refresh: self.tl("logs.refresh"),
             follow: self.tl("logs.follow"),
+            collapse: self.tl("logs.collapse"),
             search_hint: self.tl("logs.search"),
             open_folder: self.tl("logs.open_folder"),
-            copy: self.tl("logs.copy"),
+            copy_visible: self.tl("logs.copy"),
+            export: self.tl("logs.export"),
             none: self.tl("logs.none"),
             missing: self.tl("logs.missing"),
             showing: self.tl("logs.showing"),
+            summary: self.tl("logs.summary"),
+            span: self.tl("logs.span"),
             level: [
                 self.tl("logs.level.error"),
                 self.tl("logs.level.warn"),
                 self.tl("logs.level.info"),
                 self.tl("logs.level.plain"),
             ],
+            all: self.tl("logs.all"),
+            sources: self.tl("logs.sources"),
+            prev_error: self.tl("logs.prev_error"),
+            next_error: self.tl("logs.next_error"),
             size: self.tl("logs.size"),
             modified: self.tl("logs.modified"),
+            binary_banner: self.tl("logs.binary_banner"),
+            col_time: self.tl("logs.col.time"),
+            col_level: self.tl("logs.col.level"),
+            col_source: self.tl("logs.col.source"),
+            col_message: self.tl("logs.col.message"),
+            no_rows: self.tl("logs.no_rows"),
+            copied: self.tl("logs.copied"),
+            exported: self.tl("logs.exported"),
         };
         let pick = self.log_pick;
         match logview::show(ui, &pal, &mut self.logs, &sources, pick, &labels) {
@@ -1868,6 +1917,13 @@ impl App {
                 self.reload_logs();
             }
             LogAction::Reload => self.reload_logs(),
+            LogAction::Note(text, ok) => {
+                if ok {
+                    self.ok(text);
+                } else {
+                    self.err(text);
+                }
+            }
         }
     }
 

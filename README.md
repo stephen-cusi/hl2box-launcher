@@ -156,3 +156,57 @@ the game's config files.
 - Light/dark palette with an HL2-orange accent and GMod-blue highlights; new
   icon (`res/launcher.ico`, `crates/hl2box-launcher/assets/`). Generator:
   `tools/make_icon.py`.
+
+## Changes in 0.3
+
+- Logs are parsed into time, level, source tag and message. Engine stamps
+  (`[637.3787]`) and Lua stamps (`L 10/27/2026 - 03:13:21:`) both work.
+- Source chips are built from the `[Tag]`s in the file, so `[lua]`, `[HL2SB]`
+  and `[HL2SB wp]` can be shown or hidden independently.
+- Repeated consecutive lines fold into one row with a count (`x12`).
+- Session banners (`>>> Engine closed ...`) stand out as separators.
+- Prev / next error buttons jump the table to the next error.
+- Click a row to copy it; "copy visible" and "save filtered..." work on the
+  current filter.
+- Engine log is found at `<engine root>/engine.log` (older builds used
+  `hl2sb_engine.log`, still accepted).
+- Crash handler log (`hl2sb_crash.log`) is listed.
+- Decoding: UTF-8, UTF-16 with BOM, or GBK (Chinese Windows console). The
+  reader keeps whichever decodes cleanly instead of showing replacement marks.
+- Binary crash dumps (`.mdmp` / `.dmp`) are never decoded as text. They show a
+  banner and their printable strings (module paths, exception name, build).
+
+## Changes in 0.4
+
+- Crash dumps (`.mdmp` / `.dmp`) in `hl2sb/dumps/` are analysed by the
+  launcher instead of shown as text. The Logs page shows, for the newest dump:
+  the exception (code, name, faulting address), the faulting code disassembled
+  with the NULL register or the RIP-relative global it reads annotated, the
+  registers at the exception, the modules with their symbol status, the call
+  chain where return addresses can be verified, and notes on what the dump
+  does not contain.
+- Symbols come from the PDB next to each binary: `<engine>/hl2sb/bin/<name>.pdb`
+  and `<engine>/bin/<name>.pdb`. A PDB is used only when its GUID matches the
+  module's CodeView record. Public symbols are demangled.
+- The "show raw strings" button switches back to the printable-strings view.
+- Analysis is cached per file version; re-analysis happens only when the dump
+  changes.
+
+## Changes in 0.5
+
+- Windows: `hl2box-launcher.exe` embeds its icon (`res/launcher.ico`) and a
+  version resource (file/product name, company, copyright, version 0.5.0).
+  The resource is compiled by `crates/hl2box-launcher/build.rs` only when the
+  target is Windows. Building for Windows needs the resource compiler from the
+  Windows SDK (installed with Visual Studio Build Tools); without it the build
+  stops with a message rather than producing an exe without its icon.
+- Icon redrawn as a flat mark: steel plate, HL2 orange lambda, one blue
+  square. No gradients, glow or gloss. Generator: `tools/make_icon.py`.
+- Mountable games: symbolic links are not followed (a `garrysmod` link to the
+  Steam install is no longer offered), and tooling, cache, dump, and mod-copy
+  folders (e.g. `hl2sb_clear`) are skipped.
+- Crash dumps: the source picker lists every dump in `hl2sb/dumps/`, newest
+  first (up to 30), not only the newest one.
+- Crash analysis runs on a worker thread. Symbols are read only for the
+  modules the fault or the call chain lands in; other modules show "not on the
+  fault or call path". A 1.5 GB `server.pdb` is opened only when needed.

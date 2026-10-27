@@ -40,26 +40,41 @@ pub struct MountableGame {
 
 /// Scan the engine root for game directories: a directory counts when it
 /// contains a gameinfo.txt of its own or at least one .vpk archive.
+/// Directories under the engine root that are never game content: engine
+/// plumbing, tooling, caches, and the launcher's own output folders.
+const NOT_A_GAME: [&str; 16] = [
+    "bin", "bin_x64", "platform", "logs", "lua", "reslists", "tool", "cache", "custom", "dumps",
+    "dumps_wer", "cfg", "lang", "maps", "addons", "sourceengine",
+];
+
 pub fn available_games(paths: &Paths) -> Result<Vec<MountableGame>> {
     let root = &paths.engine_root;
     let mut mounted = mounted_dirs(paths)?;
+    let mod_dir = paths.mod_dir.to_ascii_lowercase();
 
     let mut out = Vec::new();
     for ent in std::fs::read_dir(root)? {
         let ent = ent?;
         let path = ent.path();
-        if !path.is_dir() {
+        // symlink_metadata: a link (e.g. garrysmod -> the Steam install) is
+        // not followed, so stock games are never offered for mounting.
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
             continue;
         }
         let name = match path.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
         };
-        // Engine plumbing dirs, never game content.
-        if matches!(
-            name.as_str(),
-            "bin" | "bin_x64" | "platform" | "hl2sb" | "sourceengine" | "logs" | "lua" | "reslists"
-        ) || name.starts_with('.')
+        let lower = name.to_ascii_lowercase();
+        // Plumbing, tooling, and the mod itself (plus copies such as hl2sb_clear).
+        if NOT_A_GAME.contains(&lower.as_str())
+            || name.starts_with('.')
+            || lower == mod_dir
+            || lower.starts_with(&format!("{mod_dir}_"))
         {
             continue;
         }
@@ -303,4 +318,49 @@ pub fn unique_addon_path(paths: &Paths, base: &str) -> PathBuf {
         n += 1;
     }
     p
+}
+
+#[cfg(test)]
+mod game_listing_tests {
+    use super::*;
+    use crate::paths::Paths;
+
+    /// A fixture shaped like the real install: real games (gameinfo or vpks),
+    /// tooling and mod copies that must be ignored, and a symlinked stock game
+    /// that must not be followed.
+    fn fixture(root: &std::path::Path) {
+        let mk = |p: &str| std::fs::create_dir_all(root.join(p)).unwrap();
+        mk("hl2");
+        std::fs::write(root.join("hl2/gameinfo.txt"), "GameInfo {}").unwrap();
+        mk("portal");
+        std::fs::write(root.join("portal/portal_pak.vpk"), b"vpk").unwrap();
+        mk("tool/VPKEdit");
+        std::fs::write(root.join("tool/VPKEdit/readme.txt"), b"x").unwrap();
+        mk("dumps");
+        std::fs::write(root.join("dumps/crash.mdmp"), b"x").unwrap();
+        mk("hl2sb_clear");
+        std::fs::write(root.join("hl2sb_clear/gameinfo.txt"), "GameInfo {}").unwrap();
+        mk("bin");
+        mk("hl2sb");
+        std::fs::write(root.join("hl2sb/gameinfo.txt"), "GameInfo {}").unwrap();
+        // the stock install lives outside the engine root; the root only links to it
+        let stock = root.parent().unwrap().join("stock_garrysmod_install");
+        std::fs::create_dir_all(&stock).unwrap();
+        std::fs::write(stock.join("gameinfo.txt"), "GameInfo {}").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&stock, root.join("garrysmod")).unwrap();
+    }
+
+    #[test]
+    fn lists_only_real_games_and_never_follows_links() {
+        let base = std::env::temp_dir().join("hl2box_game_listing_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("srceng");
+        std::fs::create_dir_all(&root).unwrap();
+        fixture(&root);
+        let paths = Paths::new(&root, "hl2sb");
+        let games: Vec<String> = available_games(&paths).unwrap().into_iter().map(|g| g.dir).collect();
+        assert_eq!(games, vec!["hl2", "portal"], "got {games:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
