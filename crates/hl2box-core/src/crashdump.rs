@@ -29,8 +29,10 @@ const STREAM_MEMORY_LIST: u32 = 5;
 const STREAM_EXCEPTION: u32 = 6;
 const STREAM_MEMORY64_LIST: u32 = 9;
 
-/// Refuse to load absurdly large dumps into memory.
-pub const MAX_DUMP_BYTES: u64 = 1 << 30;
+/// Refuse to load absurdly large dumps into memory.  WER full-memory dumps
+/// routinely run 1-2 GB, so the cap has to sit above them (loading is
+/// transient and the analysis runs on a worker thread).
+pub const MAX_DUMP_BYTES: u64 = 6 << 30;
 /// How many stack slots above RSP are scanned.
 const STACK_SLOTS: usize = 512;
 /// Instructions shown around the faulting one.
