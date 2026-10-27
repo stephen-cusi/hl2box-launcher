@@ -71,7 +71,10 @@ pub fn note_text(note: &hl2box_core::crashdump::Note, labels: &DumpLabels) -> St
         other => other.to_string(),
     };
     for (k, v) in args {
-        s = s.replace(&format!("{{{{{{{k}}}}}}}"), &v);
+        // needle is the literal `{{k}}`; spelled out so format! escaping
+        // cannot mangle it again
+        let needle = format!("{}{}{}", "{{", k, "}}");
+        s = s.replace(&needle, &v);
     }
     s
 }
