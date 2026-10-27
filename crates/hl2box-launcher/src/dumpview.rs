@@ -251,16 +251,32 @@ pub fn show(
                         action = Action::Reload;
                     }
                 });
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .id_salt("dump_files")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, (title, path, exists)) in view.list.iter().enumerate() {
-                            let mut label = title.clone();
-                            if !*exists {
-                                label.push_str("  (missing)");
+                            // group folder prefix on its own dim line, file name below
+                            let (group, name) = title
+                                .split_once(": ")
+                                .map(|(g, n)| (g.to_string(), n.to_string()))
+                                .unwrap_or_else(|| (String::new(), title.clone()));
+                            let mut label = egui::RichText::new(name);
+                            if i > 0 {
+                                if let Some((pg, _, _)) = view.list.get(i - 1) {
+                                    let pg = pg.split_once(": ").map(|x| x.0).unwrap_or("");
+                                    if pg != group {
+                                        label = label.heading().strong();
+                                    }
+                                }
                             }
-                            let resp = ui.add(egui::SelectableLabel::new(i == view.pick, label));
+                            if !*exists {
+                                label = label.weak();
+                            }
+                            let resp = ui.add(egui::SelectableLabel::new(
+                                i == view.pick,
+                                label.size(13.0),
+                            ));
                             if resp.clicked() {
                                 action = Action::Pick(i);
                             }
@@ -332,6 +348,11 @@ pub fn show(
                                     .size(16.0)
                                     .color(pal.err),
                                 );
+                                egui::ScrollArea::both()
+                                    .id_salt("dump_exc_scroll")
+                                    .max_height(140.0)
+                                    .auto_shrink([false, true])
+                                    .show(ui, |ui| {
                                 egui::Grid::new("dump_exc")
                                     .num_columns(2)
                                     .spacing([16.0, 3.0])
@@ -382,6 +403,7 @@ pub fn show(
                                             ui.end_row();
                                         }
                                     });
+                                });
                             }
                             None => {
                                 ui.label(
@@ -441,34 +463,19 @@ pub fn show(
                         if r.frames.is_empty() {
                             ui.label(egui::RichText::new(&labels.no_frames).color(pal.weak));
                         }
-                        egui::Grid::new("dump_frames")
-                            .num_columns(3)
-                            .spacing([18.0, 2.0])
+                        egui::ScrollArea::both()
+                            .id_salt("dump_frames_scroll")
+                            .max_height(300.0)
+                            .auto_shrink([false, true])
                             .show(ui, |ui| {
-                                for f in &r.frames {
-                                    ui.monospace(format!("{:>3}", f.slot));
-                                    let resp = ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(format!(
-                                                "0x{:016X}",
-                                                f.value
-                                            ))
-                                            .monospace(),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if resp.clicked() {
-                                        if let Some(mi) = module_index_of(r, f.value) {
-                                            jumps.push((mi, f.value));
+                                egui::Grid::new("dump_frames")
+                                    .num_columns(3)
+                                    .spacing([18.0, 2.0])
+                                    .show(ui, |ui| {
+                                        for f in &r.frames {
+                                            frames_row(ui, f, r, &mut jumps);
                                         }
-                                    }
-                                    let mut loc = f.location.describe();
-                                    if let Some(src) = f.location.line_desc() {
-                                        loc.push_str(&format!("  [{}]", src));
-                                    }
-                                    ui.monospace(loc);
-                                    ui.end_row();
-                                }
+                                    });
                             });
                         if r.unverified_slots > 0 {
                             ui.label(
@@ -485,7 +492,7 @@ pub fn show(
                     // modules
                     widgets::card(ui, pal, |ui| {
                         widgets::section(ui, pal, &labels.modules);
-                        egui::ScrollArea::vertical()
+                        egui::ScrollArea::both()
                             .id_salt("dump_mods")
                             .max_height(220.0)
                             .auto_shrink([false, true])
@@ -536,7 +543,12 @@ pub fn show(
                         widgets::card(ui, pal, |ui| {
                             widgets::section(ui, pal, &labels.notes);
                             for n in &r.notes {
-                                ui.label(egui::RichText::new(n).color(pal.warn));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(n).color(pal.warn),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                );
                             }
                         });
                         ui.add_space(8.0);
@@ -657,6 +669,25 @@ pub fn show(
     action
 }
 
+fn frames_row(ui: &mut egui::Ui, f: &hl2box_core::crashdump::Frame, r: &Report, jumps: &mut Vec<(usize, u64)>) {
+    ui.monospace(format!("{:>3}", f.slot));
+    let resp = ui.add(
+        egui::Label::new(egui::RichText::new(format!("0x{:016X}", f.value)).monospace())
+            .sense(egui::Sense::click()),
+    );
+    if resp.clicked() {
+        if let Some(mi) = module_index_of(r, f.value) {
+            jumps.push((mi, f.value));
+        }
+    }
+    let mut loc = f.location.describe();
+    if let Some(src) = f.location.line_desc() {
+        loc.push_str(&format!("  [{}]", src));
+    }
+    ui.monospace(loc);
+    ui.end_row();
+}
+
 /// The asm table; clicking an address adds (module, address) to `jumps`.
 fn collect_asm(
     ui: &mut egui::Ui,
@@ -666,7 +697,7 @@ fn collect_asm(
     jumps: &mut Vec<(usize, u64)>,
     r: &Report,
 ) {
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .id_salt(format!("asm_{id}"))
         .max_height(if id == "fault" { 240.0 } else { 420.0 })
         .auto_shrink([false, true])
