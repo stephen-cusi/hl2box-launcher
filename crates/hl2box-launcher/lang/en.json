@@ -258,5 +258,11 @@
   "dumps.pick_pdb_title": "Choose a PDB for the selected module",
   "dumps.pdb_forced_ok": "hand-picked PDB, {{n}} symbols",
   "dumps.pdb_forced_mismatch": "hand-picked PDB, build differs (names may be wrong)",
-  "dumps.symbols": "{{n}} symbols"
+  "dumps.symbols": "{{n}} symbols",
+  "launch.allow_debug": "Developer mode (-allowdebug)",
+  "dumps.note.av_no_target": "access violation with no target address recorded: the crash handler did not store ExceptionInformation, so read/write and the bad address are unknown",
+  "dumps.note.no_registers": "the dump has no exception-time register context",
+  "dumps.note.no_fault_code": "the code at the faulting instruction was not captured in the dump",
+  "dumps.note.no_exception_stream": "this dump has no exception stream (not a crash dump)",
+  "dumps.note.no_verified_frames": "no return address could be verified: {{n}} stack candidate(s) point into loaded modules but their call sites are not captured, so the call chain is not shown"
 }

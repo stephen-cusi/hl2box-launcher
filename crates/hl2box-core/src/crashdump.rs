@@ -164,7 +164,52 @@ pub struct Report {
     pub frames: Vec<Frame>,
     /// Stack slots that look like code but whose call site is not in the dump.
     pub unverified_slots: usize,
-    pub notes: Vec<String>,
+    pub notes: Vec<Note>,
+}
+
+/// A note the analyser attached to the report.  Rendered through the
+/// language files; [`Note::english`] keeps the exported text report stable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Note {
+    /// AV without ExceptionInformation.
+    AvNoTarget,
+    /// The exception stream carried no register context.
+    NoRegisters,
+    /// The code at RIP was not captured.
+    NoFaultCode,
+    /// Not a crash dump.
+    NoExceptionStream,
+    /// Stack candidates existed but none could be verified.
+    NoVerifiedFrames { candidates: usize },
+}
+
+impl Note {
+    /// (i18n key, parameters) for the UI.
+    pub fn key(&self) -> (&'static str, Vec<(&'static str, String)>) {
+        match self {
+            Note::AvNoTarget => ("dumps.note.av_no_target", vec![]),
+            Note::NoRegisters => ("dumps.note.no_registers", vec![]),
+            Note::NoFaultCode => ("dumps.note.no_fault_code", vec![]),
+            Note::NoExceptionStream => ("dumps.note.no_exception_stream", vec![]),
+            Note::NoVerifiedFrames { candidates } => (
+                "dumps.note.no_verified_frames",
+                vec![("n", candidates.to_string())],
+            ),
+        }
+    }
+
+    /// English text for the exported report.
+    pub fn english(&self) -> String {
+        match self {
+            Note::AvNoTarget => "access violation without a recorded target address: the crash handler did not store ExceptionInformation, so read/write and the bad address are unknown".into(),
+            Note::NoRegisters => "no exception-time register context in the dump".into(),
+            Note::NoFaultCode => "the code at the faulting instruction is not in the dump".into(),
+            Note::NoExceptionStream => "the dump has no exception stream (not a crash dump)".into(),
+            Note::NoVerifiedFrames { candidates } => format!(
+                "no return address on the stack could be verified: {candidates} candidate(s) point into loaded modules but their call sites are not in the dump, so the call chain is not shown"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -864,19 +909,15 @@ fn build(
         let loc = resolver.locate(e.address);
         let registers = e.registers.clone().unwrap_or_default();
         if e.code == 0xC000_0005 && e.params.len() >= 2 && e.params[1] == 0 {
-            notes.push(
-                "access violation without a recorded target address: the crash handler did not store \
-                 ExceptionInformation, so read/write and the bad address are unknown"
-                    .into(),
-            );
+            notes.push(Note::AvNoTarget);
         }
         if e.registers.is_none() {
-            notes.push("no exception-time register context in the dump".into());
+            notes.push(Note::NoRegisters);
         }
         if let Some(rip) = registers.get("RIP") {
             fault_asm = disassemble(dump, &resolver, rip, &registers);
             if fault_asm.is_empty() {
-                notes.push("the code at the faulting instruction is not in the dump".into());
+                notes.push(Note::NoFaultCode);
             }
         }
         if let Some(rsp) = registers.get("RSP") {
@@ -905,14 +946,11 @@ fn build(
             registers,
         });
     } else {
-        notes.push("the dump has no exception stream (not a crash dump)".into());
+        notes.push(Note::NoExceptionStream);
     }
 
     if exc.is_some() && frames.is_empty() {
-        notes.push(format!(
-            "no return address on the stack could be verified: {unverified} candidate(s) point into \
-             loaded modules but their call sites are not in the dump, so the call chain is not shown"
-        ));
+        notes.push(Note::NoVerifiedFrames { candidates: unverified });
     }
 
     Report {
@@ -1211,7 +1249,7 @@ mod tests {
             eprintln!("  frame {:>3} {}", f.slot, f.location.describe());
         }
         for n in &report.notes {
-            eprintln!("note: {n}");
+            eprintln!("note: {}", n.english());
         }
     }
 }

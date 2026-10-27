@@ -889,6 +889,8 @@ impl App {
 
         ui.add_space(10.0);
         let l_options = self.tl("launch.options");
+        let l_allowdebug = self.tl("launch.allow_debug");
+        ui.checkbox(&mut self.cfg.allow_debug, l_allowdebug);
         let l_args = self.tl("launch.extra_args");
         let l_sid = self.tl("launch.pass_steamid");
         let l_name = self.tl("launch.pass_name");
@@ -1881,6 +1883,11 @@ impl App {
                 error: self.tl("crash.error"),
                 no_exception: self.tl("crash.no_exception"),
                 dir_list: dirs,
+                note_av_no_target: self.tl("dumps.note.av_no_target"),
+                note_no_registers: self.tl("dumps.note.no_registers"),
+                note_no_fault_code: self.tl("dumps.note.no_fault_code"),
+                note_no_exception_stream: self.tl("dumps.note.no_exception_stream"),
+                note_no_verified_frames: self.tl("dumps.note.no_verified_frames"),
             },
             title: self.tl("logs.title"),
             auto: self.tl("logs.auto"),
@@ -1983,6 +1990,11 @@ impl App {
             pdb_forced_ok: self.tl("dumps.pdb_forced_ok"),
             pdb_forced_mismatch: self.tl("dumps.pdb_forced_mismatch"),
             symbols: self.tl("dumps.symbols"),
+            note_av_no_target: self.tl("dumps.note.av_no_target"),
+            note_no_registers: self.tl("dumps.note.no_registers"),
+            note_no_fault_code: self.tl("dumps.note.no_fault_code"),
+            note_no_exception_stream: self.tl("dumps.note.no_exception_stream"),
+            note_no_verified_frames: self.tl("dumps.note.no_verified_frames"),
         };
         let mut note: Option<(String, bool)> = None;
         let mut action = dumpview::show(ui, &pal, &mut self.dumps, &engine, &labels, &mut note);

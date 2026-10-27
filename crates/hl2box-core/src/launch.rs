@@ -18,6 +18,10 @@ pub struct LauncherConfig {
     pub mod_dir: String,
     /// Free-form extra arguments, e.g. "-windowed -w 1280 -h 720 +map gm_construct".
     pub extra_args: String,
+    /// Pass -allowdebug to the engine (developer console, script errors on
+    /// screen).  On by default; existing configs without the key keep it.
+    #[serde(default = "default_true")]
+    pub allow_debug: bool,
     #[serde(default = "default_true")]
     pub pass_name: bool,
     #[serde(default = "default_true")]
@@ -84,6 +88,7 @@ impl Default for LauncherConfig {
             engine_root: String::new(),
             mod_dir: "hl2sb".into(),
             extra_args: String::new(),
+            allow_debug: true,
             pass_name: true,
             pass_steamid: true,
             start_map: String::new(),
@@ -260,11 +265,10 @@ pub fn can_launch(issues: &[Issue]) -> bool {
 
 /// Build the full argument vector for hl2_launcher.
 pub fn build_args(cfg: &LauncherConfig, identity: &Identity) -> Vec<String> {
-    let mut args = vec![
-        "-game".to_string(),
-        cfg.mod_dir.clone(),
-        "-allowdebug".to_string(),
-    ];
+    let mut args = vec!["-game".to_string(), cfg.mod_dir.clone()];
+    if cfg.allow_debug {
+        args.push("-allowdebug".to_string());
+    }
     if cfg.pass_steamid {
         if let Some(id) = identity.steam_id {
             args.push("-steamid".into());

@@ -172,6 +172,59 @@ pub struct CrashLabels {
     pub error: String,
     pub no_exception: String,
     pub dir_list: String,
+    pub note_av_no_target: String,
+    pub note_no_registers: String,
+    pub note_no_fault_code: String,
+    pub note_no_exception_stream: String,
+    pub note_no_verified_frames: String,
+}
+
+impl CrashLabels {
+    fn note_labels(&self) -> crate::dumpview::DumpLabels {
+        crate::dumpview::DumpLabels {
+            title: String::new(),
+            subtitle: String::new(),
+            none: String::new(),
+            open_folder: String::new(),
+            refresh: String::new(),
+            analysing: String::new(),
+            error: String::new(),
+            exception: String::new(),
+            fault: String::new(),
+            registers: String::new(),
+            frames: String::new(),
+            no_frames: String::new(),
+            modules: String::new(),
+            notes: String::new(),
+            explorer: String::new(),
+            explorer_hint: String::new(),
+            go: String::new(),
+            no_code: String::new(),
+            click_jump: String::new(),
+            export: String::new(),
+            exported: String::new(),
+            thread: String::new(),
+            params: String::new(),
+            unverified: String::new(),
+            outside: String::new(),
+            no_exc: String::new(),
+            pdb_ok: String::new(),
+            pdb_missing: String::new(),
+            pdb_mismatch: String::new(),
+            pdb_unreadable: String::new(),
+            pdb_noid: String::new(),
+            pdb_not_loaded: String::new(),
+            pick_pdb: String::new(),
+            pdb_forced_ok: String::new(),
+            pdb_forced_mismatch: String::new(),
+            symbols: String::new(),
+            note_av_no_target: self.note_av_no_target.clone(),
+            note_no_registers: self.note_no_registers.clone(),
+            note_no_fault_code: self.note_no_fault_code.clone(),
+            note_no_exception_stream: self.note_no_exception_stream.clone(),
+            note_no_verified_frames: self.note_no_verified_frames.clone(),
+        }
+    }
 }
 
 pub struct LogLabels {
@@ -783,7 +836,8 @@ fn crash_view(ui: &mut egui::Ui, pal: &Palette, view: &LogView, c: &CrashLabels)
         widgets::card(ui, pal, |ui| {
             widgets::section(ui, pal, &c.notes);
             for n in &r.notes {
-                ui.label(egui::RichText::new(n).color(pal.warn));
+                let text = crate::dumpview::note_text(n, &c.note_labels());
+                ui.label(egui::RichText::new(text).color(pal.warn));
             }
         });
     }

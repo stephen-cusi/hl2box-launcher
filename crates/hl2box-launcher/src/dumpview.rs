@@ -52,6 +52,28 @@ pub struct DumpLabels {
     pub pdb_forced_ok: String,
     pub pdb_forced_mismatch: String,
     pub symbols: String,
+    pub note_av_no_target: String,
+    pub note_no_registers: String,
+    pub note_no_fault_code: String,
+    pub note_no_exception_stream: String,
+    pub note_no_verified_frames: String,
+}
+
+/// Render an analyser note through the page labels.
+pub fn note_text(note: &hl2box_core::crashdump::Note, labels: &DumpLabels) -> String {
+    let (key, args) = note.key();
+    let mut s = match key {
+        "dumps.note.av_no_target" => labels.note_av_no_target.clone(),
+        "dumps.note.no_registers" => labels.note_no_registers.clone(),
+        "dumps.note.no_fault_code" => labels.note_no_fault_code.clone(),
+        "dumps.note.no_exception_stream" => labels.note_no_exception_stream.clone(),
+        "dumps.note.no_verified_frames" => labels.note_no_verified_frames.clone(),
+        other => other.to_string(),
+    };
+    for (k, v) in args {
+        s = s.replace(&format!("{{{{{{{k}}}}}}}"), &v);
+    }
+    s
 }
 
 /// Everything the page remembers.
@@ -543,9 +565,10 @@ pub fn show(
                         widgets::card(ui, pal, |ui| {
                             widgets::section(ui, pal, &labels.notes);
                             for n in &r.notes {
+                                let text = note_text(n, labels);
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(n).color(pal.warn),
+                                        egui::RichText::new(text).color(pal.warn),
                                     )
                                     .wrap_mode(egui::TextWrapMode::Wrap),
                                 );
@@ -848,7 +871,7 @@ fn report_text(r: &Report, labels: &DumpLabels) -> String {
     if !r.notes.is_empty() {
         out.push_str("\nnotes:\n");
         for n in &r.notes {
-            out.push_str(&format!("  - {n}\n"));
+            out.push_str(&format!("  - {}\n", n.english()));
         }
     }
     out
