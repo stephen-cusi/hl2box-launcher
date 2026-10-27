@@ -82,12 +82,14 @@ pub struct Exception {
 }
 
 /// Where an address lands: module, offset and (when a PDB matched) the
-/// nearest public symbol.
+/// nearest public symbol and source line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub module: String,
     pub offset: u64,
     pub symbol: Option<(String, u64)>,
+    /// `file.cpp` and the 1-based line, when the PDB carries line data.
+    pub line: Option<(String, u32)>,
 }
 
 impl Location {
@@ -97,6 +99,11 @@ impl Location {
             Some((name, off)) => format!("{}!{}+0x{:X}", self.module, name, off),
             None => format!("{}+0x{:X}", self.module, self.offset),
         }
+    }
+
+    /// `file.cpp:line`, when known.
+    pub fn line_desc(&self) -> Option<String> {
+        self.line.as_ref().map(|(f, n)| format!("{f}:{n}"))
     }
 }
 
@@ -135,6 +142,8 @@ pub struct AsmRow {
     /// `function+offset` for the instruction address, when a symbol table is
     /// loaded for the module that owns it.
     pub symbol: Option<String>,
+    /// `file.cpp:line` for the instruction address, when line data is loaded.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -340,7 +349,34 @@ fn parse_context(c: &[u8]) -> Option<Registers> {
 
 /// Map a PDB whose GUID matches a module. Returns the sorted function table
 /// (`rva`, demangled name) or why it was rejected.
-pub fn load_pdb(path: &Path, guid: &[u8; 16]) -> Result<Vec<(u32, String)>, PdbState> {
+/// Function symbols plus, when the PDB carries line data, a source-line map.
+#[derive(Default, Clone)]
+pub struct Symbols {
+    /// (rva, demangled name), sorted by rva.
+    pub funcs: Vec<(u32, String)>,
+    /// (rva, file index, 1-based line), sorted by rva.
+    pub lines: Vec<(u32, u32, u32)>,
+    /// Source file paths, indexed by the line entries' file index.
+    pub files: Vec<String>,
+}
+
+impl Symbols {
+    fn file_name(&self, idx: u32) -> Option<&str> {
+        let full = self.files.get(idx as usize)?;
+        let base = full.rsplit(['\\', '/']).next().unwrap_or(full);
+        Some(base)
+    }
+
+    /// `file.cpp:line` for an rva, when mapped.
+    pub fn line_at(&self, rva: u32) -> Option<(String, u32)> {
+        let i = self.lines.partition_point(|e| e.0 <= rva).checked_sub(1)?;
+        let e = &self.lines[i];
+        Some((self.file_name(e.1)?.to_string(), e.2))
+    }
+}
+
+pub fn load_pdb(path: &Path, guid: &[u8; 16]) -> Result<Symbols, PdbState> {
+    use pdb::FallibleIterator;
     let file = std::fs::File::open(path).map_err(|e| PdbState::Unreadable(e.to_string()))?;
     let mut pdb = pdb::PDB::open(file).map_err(|e| PdbState::Unreadable(e.to_string()))?;
     let info = pdb.pdb_information().map_err(|e| PdbState::Unreadable(e.to_string()))?;
@@ -351,8 +387,7 @@ pub fn load_pdb(path: &Path, guid: &[u8; 16]) -> Result<Vec<(u32, String)>, PdbS
     let table = pdb.global_symbols().map_err(|e| PdbState::Unreadable(e.to_string()))?;
     let mut funcs = Vec::new();
     let mut iter = table.iter();
-    use pdb::FallibleIterator;
-    while let Ok(Some(sym)) = iter.next() {
+    while let Some(sym) = iter.next().map_err(|e| PdbState::Unreadable(e.to_string()))? {
         if let Ok(pdb::SymbolData::Public(p)) = sym.parse() {
             if !(p.code || p.function) {
                 continue;
@@ -365,32 +400,67 @@ pub fn load_pdb(path: &Path, guid: &[u8; 16]) -> Result<Vec<(u32, String)>, PdbS
     }
     funcs.sort_by_key(|(rva, _)| *rva);
     funcs.dedup_by_key(|(rva, _)| *rva);
-    Ok(funcs)
+
+    // Source lines: per-compiland line programs.  Missing line streams (a
+    // public-only or stripped PDB) just leave the map empty.
+    let mut symbols = Symbols { funcs, ..Default::default() };
+    if let Ok(dbi) = pdb.debug_information() {
+        if let Ok(modules) = dbi.modules() {
+            let mut next_module = modules;
+            while let Ok(Some(modul)) = next_module.next() {
+                let Ok(Some(mi)) = pdb.module_info(&modul) else { continue };
+                let Ok(lp) = mi.line_program() else { continue };
+                // per-module file table: checksum-file index -> our files vec
+                let mut file_ids: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+                let mut lines_iter = lp.lines();
+                while let Ok(Some(li)) = lines_iter.next() {
+                    let Some(rva) = li.offset.to_rva(&address_map) else { continue };
+                    let mapped = match file_ids.get(&li.file_index.0) {
+                        Some(&m) => m,
+                        None => {
+                            let name = lp
+                                .get_file_info(li.file_index)
+                                .ok()
+                                .map(|info| info.name.to_string())
+                                .unwrap_or_default();
+                            let m = symbols.files.len() as u32;
+                            symbols.files.push(name);
+                            file_ids.insert(li.file_index.0, m);
+                            m
+                        }
+                    };
+                    symbols.lines.push((rva.0, li.line_start, mapped));
+                }
+            }
+        }
+    }
+    symbols.lines.sort_by_key(|e| e.0);
+    Ok(symbols)
 }
 
 /// Load the PDB the user picked by hand.  The module's CodeView GUID is the
 /// referee: a file from a different build still loads (the user asked for it)
 /// but the state says so, and the UI can show the warning.
-fn load_pdb_forced(path: &Path, module: &Module) -> (PdbState, Vec<(u32, String)>) {
+fn load_pdb_forced(path: &Path, module: &Module) -> (PdbState, Symbols) {
     let Some((guid, _)) = module.codeview else {
         // no identity to check against: trust the user's choice
         return match load_pdb_nocheck(path) {
-            Ok(funcs) => (PdbState::Loaded(funcs.len()), funcs),
-            Err(e) => (e, Vec::new()),
+            Ok(funcs) => (PdbState::Loaded(funcs.funcs.len()), funcs),
+            Err(e) => (e, Symbols::default()),
         };
     };
     match load_pdb(path, &guid) {
-        Ok(funcs) => (PdbState::Loaded(funcs.len()), funcs),
+        Ok(funcs) => (PdbState::Loaded(funcs.funcs.len()), funcs),
         Err(PdbState::Mismatch) => match load_pdb_nocheck(path) {
             Ok(funcs) => (PdbState::Mismatch, funcs),
-            Err(e) => (e, Vec::new()),
+            Err(e) => (e, Symbols::default()),
         },
-        Err(other) => (other, Vec::new()),
+        Err(other) => (other, Symbols::default()),
     }
 }
 
 /// Parse a PDB without checking its GUID against anything.
-fn load_pdb_nocheck(path: &Path) -> Result<Vec<(u32, String)>, PdbState> {
+fn load_pdb_nocheck(path: &Path) -> Result<Symbols, PdbState> {
     let file = std::fs::File::open(path).map_err(|e| PdbState::Unreadable(e.to_string()))?;
     let mut pdb = pdb::PDB::open(file).map_err(|e| PdbState::Unreadable(e.to_string()))?;
     let address_map = pdb.address_map().map_err(|e| PdbState::Unreadable(e.to_string()))?;
@@ -411,7 +481,7 @@ fn load_pdb_nocheck(path: &Path) -> Result<Vec<(u32, String)>, PdbState> {
     }
     funcs.sort_by_key(|(rva, _)| *rva);
     funcs.dedup_by_key(|(rva, _)| *rva);
-    Ok(funcs)
+    Ok(Symbols { funcs, lines: Vec::new(), files: Vec::new() })
 }
 
 /// Candidate PDB locations for a module: next to it in the engine tree
@@ -437,9 +507,9 @@ pub fn pdb_candidates(engine_root: &Path, module: &Module) -> Vec<PathBuf> {
 }
 
 /// Choose the PDB for a module among its candidates and load it.
-pub fn resolve_pdb(engine_root: &Path, module: &Module) -> (PdbState, Vec<(u32, String)>) {
+pub fn resolve_pdb(engine_root: &Path, module: &Module) -> (PdbState, Symbols) {
     let Some((guid, _)) = module.codeview else {
-        return (PdbState::NoIdentity, Vec::new());
+        return (PdbState::NoIdentity, Symbols::default());
     };
     let mut saw_mismatch = false;
     let mut last_err = None;
@@ -448,24 +518,24 @@ pub fn resolve_pdb(engine_root: &Path, module: &Module) -> (PdbState, Vec<(u32, 
             continue;
         }
         match load_pdb(&candidate, &guid) {
-            Ok(funcs) => return (PdbState::Loaded(funcs.len()), funcs),
+            Ok(funcs) => return (PdbState::Loaded(funcs.funcs.len()), funcs),
             Err(PdbState::Mismatch) => saw_mismatch = true,
             Err(other) => last_err = Some(other),
         }
     }
     if saw_mismatch {
-        (PdbState::Mismatch, Vec::new())
+        (PdbState::Mismatch, Symbols::default())
     } else if let Some(e) = last_err {
-        (e, Vec::new())
+        (e, Symbols::default())
     } else {
-        (PdbState::Missing, Vec::new())
+        (PdbState::Missing, Symbols::default())
     }
 }
 
 /// Resolve addresses against the module list and the loaded symbol tables.
 struct Resolver {
     modules: Vec<Module>,
-    symbols: Vec<Vec<(u32, String)>>,
+    symbols: Vec<Symbols>,
 }
 
 impl Resolver {
@@ -477,12 +547,17 @@ impl Resolver {
         let i = self.module_of(va)?;
         let m = &self.modules[i];
         let off = va - m.base;
-        let symbol = self.symbols[i].partition_point(|(rva, _)| (*rva as u64) <= off);
-        let symbol = symbol.checked_sub(1).map(|j| {
-            let (rva, name) = &self.symbols[i][j];
-            (name.clone(), off - *rva as u64)
-        });
-        Some(Location { module: m.name.clone(), offset: off, symbol })
+        let table = &self.symbols[i];
+        let symbol = table
+            .funcs
+            .partition_point(|(rva, _)| (*rva as u64) <= off)
+            .checked_sub(1)
+            .map(|j| {
+                let (rva, name) = &table.funcs[j];
+                (name.clone(), off - *rva as u64)
+            });
+        let line = table.line_at(off as u32);
+        Some(Location { module: m.name.clone(), offset: off, symbol, line })
     }
 }
 
@@ -550,11 +625,12 @@ fn disassemble(dump: &Dump, res: &Resolver, fault: u64, regs: &Registers) -> Vec
             None
         };
         let target = mem_target(ins, regs);
-        let symbol = res
-            .locate(ins.ip())
-            .and_then(|l| l.symbol)
-            .map(|(name, off)| format!("{name}+0x{off:X}"));
-        rows.push(AsmRow { address: ins.ip(), text, fault: ins.ip() == fault, note, target, symbol });
+        let loc = res.locate(ins.ip());
+        let symbol = loc
+            .as_ref()
+            .and_then(|l| l.symbol.as_ref().map(|(name, off)| format!("{name}+0x{off:X}")));
+        let source = loc.as_ref().and_then(|l| l.line_desc());
+        rows.push(AsmRow { address: ins.ip(), text, fault: ins.ip() == fault, note, target, symbol, source });
     }
     rows
 }
@@ -630,7 +706,7 @@ pub struct ModuleContext {
     pub index: usize,
     pub module: Module,
     pub pdb: PdbState,
-    pub symbols: Vec<(u32, String)>,
+    pub symbols: Symbols,
 }
 
 /// Disassemble `count` instructions of code captured in the dump, starting
@@ -657,7 +733,7 @@ pub fn disassemble_range(
     let ctx = ModuleContext { index: module_index, module: module.clone(), pdb, symbols };
 
     // symbol tables are indexed by module index; only the explored module has one
-    let mut tables: Vec<Vec<(u32, String)>> = vec![Vec::new(); modules.len()];
+    let mut tables: Vec<Symbols> = vec![Symbols::default(); modules.len()];
     tables[module_index] = ctx.symbols.clone();
     let res = Resolver { modules, symbols: tables };
     let regs = dump.exception().and_then(|e| e.registers).unwrap_or_default();
@@ -707,11 +783,12 @@ pub fn disassemble_range(
         fmt.format(&ins, &mut text);
         let note = memory_note(&dump, &res, &ins, &regs);
         let target = mem_target(&ins, &regs);
-        let symbol = res
-            .locate(ins.ip())
-            .and_then(|l| l.symbol)
-            .map(|(name, off)| format!("{name}+0x{off:X}"));
-        rows.push(AsmRow { address: ins.ip(), text, fault: false, note, target, symbol });
+        let loc = res.locate(ins.ip());
+        let symbol = loc
+            .as_ref()
+            .and_then(|l| l.symbol.as_ref().map(|(name, off)| format!("{name}+0x{off:X}")));
+        let source = loc.as_ref().and_then(|l| l.line_desc());
+        rows.push(AsmRow { address: ins.ip(), text, fault: false, note, target, symbol, source });
     }
     Ok((ctx, rows, Some(regs)))
 }
@@ -727,7 +804,7 @@ pub fn analyze(dump_path: &Path, engine_root: &Path) -> Result<Report, String> {
 
     let first = build(&dump, dump_path, size, engine_root, Some(&HashSet::new()));
     let modules = dump.modules();
-    let resolver = Resolver { modules: modules.clone(), symbols: vec![Vec::new(); modules.len()] };
+    let resolver = Resolver { modules: modules.clone(), symbols: vec![Symbols::default(); modules.len()] };
     let mut needed: HashSet<usize> = HashSet::new();
     let mut mark = |addr: u64| {
         if let Some(i) = resolver.module_of(addr) {
@@ -770,7 +847,7 @@ fn build(
         let (pdb, funcs) = if wanted {
             resolve_pdb(engine_root, m)
         } else {
-            (PdbState::NotLoaded, Vec::new())
+            (PdbState::NotLoaded, Symbols::default())
         };
         symbols.push(funcs);
         module_rows.push(ModuleRow { module: m.clone(), pdb });
@@ -971,12 +1048,13 @@ mod tests {
 
     #[test]
     fn describes_locations_with_and_without_symbols() {
-        let loc = Location { module: "server.dll".into(), offset: 0x4E65A9, symbol: None };
+        let loc = Location { module: "server.dll".into(), offset: 0x4E65A9, symbol: None, line: None };
         assert_eq!(loc.describe(), "server.dll+0x4E65A9");
         let loc = Location {
             module: "server.dll".into(),
             offset: 0x4E65A9,
             symbol: Some(("CBaseEntity::Think".into(), 0x20)),
+            line: Some(("cbaseentity.cpp".into(), 4102)),
         };
         assert_eq!(loc.describe(), "server.dll!CBaseEntity::Think+0x20");
     }
@@ -1007,7 +1085,7 @@ mod tests {
         let code = [0x48, 0x8B, 0x01, 0xC3];
         let dump = dump_with(&code_at(0x10000, &code), &[("RIP", 0x10000), ("RCX", 0), ("RAX", 1)]);
         let regs = dump.exception().unwrap().registers.unwrap();
-        let res = Resolver { modules: dump.modules(), symbols: vec![Vec::new()] };
+        let res = Resolver { modules: dump.modules(), symbols: vec![Symbols::default()] };
         let rows = disassemble(&dump, &res, 0x10000, &regs);
         let fault = rows.iter().find(|r| r.fault).expect("fault row");
         assert!(fault.text.starts_with("mov rax"), "got {}", fault.text);
@@ -1024,7 +1102,7 @@ mod tests {
         page[0x17..0x1F].copy_from_slice(&0u64.to_le_bytes()); // the global, NULL
         let dump = dump_with(&[(0x10000, page)], &[("RIP", 0x10000)]);
         let regs = dump.exception().unwrap().registers.unwrap();
-        let res = Resolver { modules: dump.modules(), symbols: vec![Vec::new()] };
+        let res = Resolver { modules: dump.modules(), symbols: vec![Symbols::default()] };
         let rows = disassemble(&dump, &res, 0x10000, &regs);
         let note = rows.iter().find(|r| r.fault).unwrap().note.clone().unwrap();
         assert!(note.contains("reads global") && note.contains("= 0x0"), "note: {note}");
@@ -1042,7 +1120,7 @@ mod tests {
         };
         let res = Resolver {
             modules: vec![m],
-            symbols: vec![vec![(0x100, "alpha".into()), (0x400, "beta".into())]],
+            symbols: vec![Symbols { funcs: vec![(0x100, "alpha".into()), (0x400, "beta".into())], lines: Vec::new(), files: Vec::new() }],
         };
         let at = |off: u64| res.locate(0x1000_0000 + off).unwrap();
         assert_eq!(at(0x120).symbol, Some(("alpha".into(), 0x20)));
@@ -1080,10 +1158,11 @@ mod tests {
         let mut pdb = pdb::PDB::open(file).expect("parse pdb");
         let guid = pdb.pdb_information().expect("pdb info").guid.to_bytes_le();
 
-        let funcs = load_pdb(path, &guid).expect("matching guid loads");
-        assert!(!funcs.is_empty(), "a real PDB has public function symbols");
-        assert!(funcs.windows(2).all(|w| w[0].0 <= w[1].0), "table is sorted by rva");
-        eprintln!("{} functions, first: {:?}", funcs.len(), &funcs[..funcs.len().min(5)]);
+        let syms = load_pdb(path, &guid).expect("matching guid loads");
+        assert!(!syms.funcs.is_empty(), "a real PDB has public function symbols");
+        assert!(syms.funcs.windows(2).all(|w| w[0].0 <= w[1].0), "table is sorted by rva");
+        eprintln!("{} functions, {} lines, first: {:?}", syms.funcs.len(), syms.lines.len(),
+            &syms.funcs[..syms.funcs.len().min(5)]);
 
         let other = [0xABu8; 16];
         assert_eq!(load_pdb(path, &other).err(), Some(PdbState::Mismatch));

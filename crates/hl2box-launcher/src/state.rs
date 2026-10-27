@@ -1986,6 +1986,38 @@ impl App {
         };
         let mut note: Option<(String, bool)> = None;
         let mut action = dumpview::show(ui, &pal, &mut self.dumps, &engine, &labels, &mut note);
+        // The first analysis pass only loads PDBs on the fault path.  Once the
+        // report is up, resolve every remaining module in the background (only
+        // engine DLLs actually have PDB files, so this is a handful of reads)
+        // and patch the module table when it lands.
+        if let Some(r) = &self.dumps.report {
+            if !self.dumps.pdb_resolved {
+                self.dumps.pdb_resolved = true;
+                let modules: Vec<_> = r.modules.iter().map(|m| m.module.clone()).collect();
+                let engine2 = engine.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let out = modules
+                        .iter()
+                        .map(|m| hl2box_core::crashdump::resolve_pdb(&engine2, m).0)
+                        .collect::<Vec<_>>();
+                    let _ = tx.send(out);
+                });
+                self.dumps.pdb_patch = Some(rx);
+            }
+        }
+        if let Some(rx) = &self.dumps.pdb_patch {
+            if let Ok(states) = rx.try_recv() {
+                if let Some(r) = &mut self.dumps.report {
+                    for (row, st) in r.modules.iter_mut().zip(states) {
+                        row.pdb = st;
+                    }
+                }
+                self.dumps.pdb_patch = None;
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
         if let Some((text, ok)) = note {
             if ok { self.ok(text); } else { self.err(text); }
         }

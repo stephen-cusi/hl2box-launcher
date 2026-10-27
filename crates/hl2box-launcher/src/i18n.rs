@@ -43,11 +43,25 @@ impl Catalog {
                           locale: &str,
                           text: &str| {
             if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(text) {
-                if !map.is_empty() {
-                    if !order.iter().any(|l| l == locale) {
-                        order.push(locale.to_string());
+                if map.is_empty() {
+                    return;
+                }
+                // An external file for a locale we already bundle MERGES into
+                // the built-in table instead of replacing it: a stale lang/
+                // file from an older build would otherwise hide every key
+                // added since and the UI falls back to raw key names.
+                match tables.get_mut(locale) {
+                    Some(bundled) => {
+                        for (k, v) in map {
+                            bundled.insert(k, v);
+                        }
                     }
-                    tables.insert(locale.to_string(), map);
+                    None => {
+                        tables.insert(locale.to_string(), map);
+                    }
+                }
+                if !order.iter().any(|l| l == locale) {
+                    order.push(locale.to_string());
                 }
             }
         };

@@ -80,6 +80,9 @@ pub struct DumpView {
         >,
     >,
     pub asm_key: Option<(PathBuf, usize, u64, usize)>,
+    /// The not-on-fault-path modules were queued for PDB resolution.
+    pub pdb_resolved: bool,
+    pub pdb_patch: Option<std::sync::mpsc::Receiver<Vec<PdbState>>>,
 }
 
 /// Re-scan both dump folders, newest first.
@@ -96,6 +99,9 @@ pub fn refresh(view: &mut DumpView, mod_root: &std::path::Path) {
     view.asm = None;
     view.asm_error = None;
     view.asm_key = None;
+    view.pdb_resolved = false;
+    view.pdb_patch = None;
+    view.manual_pdb = None;
 }
 
 fn list_dir(view: &mut DumpView, dir: PathBuf, title: &str) {
@@ -204,10 +210,13 @@ pub fn show(
                     ctx.module.name,
                     ctx.module.base,
                     pdb_text(&ctx.pdb, labels),
-                    if ctx.symbols.is_empty() {
+                    if ctx.symbols.funcs.is_empty() {
                         String::new()
                     } else {
-                        format!("   {}", labels.symbols.replace("{{n}}", &ctx.symbols.len().to_string()))
+                        format!(
+                            "   {}",
+                            labels.symbols.replace("{{n}}", &ctx.symbols.funcs.len().to_string())
+                        )
                     }
                 );
                 view.asm = Some((header, rows));
@@ -331,13 +340,18 @@ pub fn show(
                                         ui.monospace(e.thread_id.to_string());
                                         ui.end_row();
                                         ui.label(egui::RichText::new("address").color(pal.weak));
-                                        let loc = e
+                                        let mut loc = e
                                             .location
                                             .as_ref()
                                             .map(|l| l.describe())
                                             .unwrap_or_else(|| {
                                                 labels.outside.clone()
                                             });
+                                        if let Some(src) =
+                                            e.location.as_ref().and_then(|l| l.line_desc())
+                                        {
+                                            loc.push_str(&format!("  [{}]", src));
+                                        }
                                         let resp = ui.add(
                                             egui::Label::new(
                                                 egui::RichText::new(format!(
@@ -448,7 +462,11 @@ pub fn show(
                                             jumps.push((mi, f.value));
                                         }
                                     }
-                                    ui.monospace(f.location.describe());
+                                    let mut loc = f.location.describe();
+                                    if let Some(src) = f.location.line_desc() {
+                                        loc.push_str(&format!("  [{}]", src));
+                                    }
+                                    ui.monospace(loc);
                                     ui.end_row();
                                 }
                             });
@@ -663,6 +681,9 @@ fn collect_asm(
                         if let Some(sym) = &row.symbol {
                             line.push_str(&format!("   ; {}", sym));
                         }
+                        if let Some(src) = &row.source {
+                            line.push_str(&format!("  [{}]", src));
+                        }
                         let resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(line).monospace().color(color),
@@ -721,10 +742,17 @@ fn report_text(r: &Report, labels: &DumpLabels) -> String {
             e.code,
             e.thread_id,
             e.address,
-            e.location
-                .as_ref()
-                .map(|l| l.describe())
-                .unwrap_or_default(),
+            {
+                let mut s = e
+                    .location
+                    .as_ref()
+                    .map(|l| l.describe())
+                    .unwrap_or_default();
+                if let Some(src) = e.location.as_ref().and_then(|l| l.line_desc()) {
+                    s.push_str(&format!("  [{}]", src));
+                }
+                s
+            },
             e.params
                 .iter()
                 .map(|p| format!("0x{p:X}"))
@@ -741,13 +769,17 @@ fn report_text(r: &Report, labels: &DumpLabels) -> String {
         out.push_str("faulting code:\n");
         for row in &r.fault_asm {
             out.push_str(&format!(
-                "{} 0x{:016X}  {}{}\n",
+                "{} 0x{:016X}  {}{}{}\n",
                 if row.fault { ">" } else { " " },
                 row.address,
                 row.text,
                 row.note
                     .clone()
                     .map(|n| format!("   ; {n}"))
+                    .unwrap_or_default(),
+                row.source
+                    .as_ref()
+                    .map(|s| format!("  [{}]", s))
                     .unwrap_or_default()
             ));
         }
@@ -756,12 +788,11 @@ fn report_text(r: &Report, labels: &DumpLabels) -> String {
     if !r.frames.is_empty() {
         out.push_str("call chain:\n");
         for f in &r.frames {
-            out.push_str(&format!(
-                "{:>4}  0x{:016X}  {}\n",
-                f.slot,
-                f.value,
-                f.location.describe()
-            ));
+            let mut loc = f.location.describe();
+            if let Some(src) = f.location.line_desc() {
+                loc.push_str(&format!("  [{}]", src));
+            }
+            out.push_str(&format!("{:>4}  0x{:016X}  {}\n", f.slot, f.value, loc));
         }
         out.push('\n');
     }
