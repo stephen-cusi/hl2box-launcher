@@ -251,5 +251,12 @@
   "crash.error": "无法分析这个 dump：{{e}}",
   "crash.no_exception": "这个 dump 没有异常记录",
   "crash.pdb_not_loaded": "不在出错位置或调用链上：未加载符号",
-  "crash.loading": "正在分析 dump，并为相关模块加载符号..."
+  "crash.loading": "正在分析 dump，并为相关模块加载符号...",
+  "dumps.unverified": "另有 {{n}} 个栈槽看似代码但其调用点未被捕获",
+  "dumps.outside": "不在任何已加载模块内",
+  "dumps.pick_pdb": "手动选择 PDB...",
+  "dumps.pick_pdb_title": "为所选模块选择 PDB",
+  "dumps.pdb_forced_ok": "手动 PDB，{{n}} 个符号",
+  "dumps.pdb_forced_mismatch": "手动 PDB，构建不匹配（函数名可能有误）",
+  "dumps.symbols": "{{n}} 个符号"
 }

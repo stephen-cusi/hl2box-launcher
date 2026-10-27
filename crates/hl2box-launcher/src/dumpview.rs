@@ -30,7 +30,6 @@ pub struct DumpLabels {
     pub no_frames: String,
     pub modules: String,
     pub notes: String,
-    pub no_exception: String,
     pub explorer: String,
     pub explorer_hint: String,
     pub go: String,
@@ -38,6 +37,21 @@ pub struct DumpLabels {
     pub click_jump: String,
     pub export: String,
     pub exported: String,
+    pub thread: String,
+    pub params: String,
+    pub unverified: String,
+    pub outside: String,
+    pub no_exc: String,
+    pub pdb_ok: String,
+    pub pdb_missing: String,
+    pub pdb_mismatch: String,
+    pub pdb_unreadable: String,
+    pub pdb_noid: String,
+    pub pdb_not_loaded: String,
+    pub pick_pdb: String,
+    pub pdb_forced_ok: String,
+    pub pdb_forced_mismatch: String,
+    pub symbols: String,
 }
 
 /// Everything the page remembers.
@@ -55,6 +69,8 @@ pub struct DumpView {
     pub module_pick: usize,
     pub addr_text: String,
     pub count_text: String,
+    /// PDB chosen by hand for the selected module (overrides the search).
+    pub manual_pdb: Option<PathBuf>,
     /// (header line, rows) of the explorer disassembly.
     pub asm: Option<(String, Vec<AsmRow>)>,
     pub asm_error: Option<String>,
@@ -116,6 +132,8 @@ pub enum Action {
     Reload,
     /// Disassemble `count` rows of module `module` at `va`.
     Disassemble(usize, u64, usize),
+    /// Open a file dialog; the picked path becomes the selected module's PDB.
+    PickPdb,
 }
 
 fn parse_addr(text: &str) -> Option<u64> {
@@ -185,11 +203,11 @@ pub fn show(
                     "{}  base 0x{:016X}   {}{}",
                     ctx.module.name,
                     ctx.module.base,
-                    pdb_text(&ctx.pdb),
+                    pdb_text(&ctx.pdb, labels),
                     if ctx.symbols.is_empty() {
                         String::new()
                     } else {
-                        format!("   {} symbols", ctx.symbols.len())
+                        format!("   {}", labels.symbols.replace("{{n}}", &ctx.symbols.len().to_string()))
                     }
                 );
                 view.asm = Some((header, rows));
@@ -309,7 +327,7 @@ pub fn show(
                                     .num_columns(2)
                                     .spacing([16.0, 3.0])
                                     .show(ui, |ui| {
-                                        ui.label(egui::RichText::new("thread").color(pal.weak));
+                                        ui.label(egui::RichText::new(&labels.thread).color(pal.weak));
                                         ui.monospace(e.thread_id.to_string());
                                         ui.end_row();
                                         ui.label(egui::RichText::new("address").color(pal.weak));
@@ -318,7 +336,7 @@ pub fn show(
                                             .as_ref()
                                             .map(|l| l.describe())
                                             .unwrap_or_else(|| {
-                                                "outside every module".into()
+                                                labels.outside.clone()
                                             });
                                         let resp = ui.add(
                                             egui::Label::new(
@@ -338,7 +356,7 @@ pub fn show(
                                         ui.end_row();
                                         if !e.params.is_empty() {
                                             ui.label(
-                                                egui::RichText::new("parameters").color(pal.weak),
+                                                egui::RichText::new(&labels.params).color(pal.weak),
                                             );
                                             ui.monospace(
                                                 e.params
@@ -353,7 +371,7 @@ pub fn show(
                             }
                             None => {
                                 ui.label(
-                                    egui::RichText::new(&labels.no_exception).color(pal.weak),
+                                    egui::RichText::new(&labels.no_exc).color(pal.weak),
                                 );
                             }
                         }
@@ -436,10 +454,9 @@ pub fn show(
                             });
                         if r.unverified_slots > 0 {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "+ {} stack slot(s) look like code but their call site is not captured",
-                                    r.unverified_slots
-                                ))
+                                egui::RichText::new(
+                                    labels.unverified.replace("{{n}}", &r.unverified_slots.to_string()),
+                                )
                                 .small()
                                 .color(pal.weak),
                             );
@@ -475,7 +492,17 @@ pub fn show(
                                             ui.monospace(crate::explorer::human_size(
                                                 m.module.size,
                                             ));
-                                            let (text, color) = pdb_text_row(&m.pdb, pal);
+                                            let selected = view.module_pick == i;
+                                            let (text, color) = pdb_text_row(&m.pdb, pal, labels);
+                                            let text = if selected && view.manual_pdb.is_some() {
+                                                match &m.pdb {
+                                                    PdbState::Mismatch => labels.pdb_forced_mismatch.clone(),
+                                                    PdbState::Loaded(n) => labels.pdb_forced_ok.replace("{{n}}", &n.to_string()),
+                                                    _ => text,
+                                                }
+                                            } else {
+                                                text
+                                            };
                                             ui.label(
                                                 egui::RichText::new(text).color(color).small(),
                                             );
@@ -538,6 +565,17 @@ pub fn show(
                                     .hint_text("rows")
                                     .desired_width(48.0),
                             );
+                            if ui.button(&labels.pick_pdb).clicked() {
+                                action = Action::PickPdb;
+                            }
+                            if let Some(pdb) = &view.manual_pdb {
+                                let name = pdb
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                ui.label(egui::RichText::new(name).small().color(pal.blue))
+                                    .on_hover_text(pdb.display().to_string());
+                            }
                             let go = ui.button(&labels.go).clicked();
                             let enter = addr_focus && ui.input(|i| i.key_pressed(egui::Key::Enter));
                             if go || enter {
@@ -581,7 +619,7 @@ pub fn show(
                     // export the whole report as text next to the dump
                     ui.add_space(4.0);
                     if ui.button(&labels.export).clicked() {
-                        let text = report_text(r);
+                        let text = report_text(r, labels);
                         let path =
                             std::path::Path::new(&r.dump_path).with_extension("report.txt");
                         match std::fs::write(&path, text) {
@@ -621,14 +659,13 @@ fn collect_asm(
                 .show(ui, |ui| {
                     for row in rows {
                         let color = if row.fault { pal.err } else { pal.text };
+                        let mut line = format!("{:016X}  {}", row.address, row.text);
+                        if let Some(sym) = &row.symbol {
+                            line.push_str(&format!("   ; {}", sym));
+                        }
                         let resp = ui.add(
                             egui::Label::new(
-                                egui::RichText::new(format!(
-                                    "{:016X}  {}",
-                                    row.address, row.text
-                                ))
-                                .monospace()
-                                .color(color),
+                                egui::RichText::new(line).monospace().color(color),
                             )
                             .sense(egui::Sense::click()),
                         );
@@ -651,30 +688,30 @@ fn collect_asm(
         });
 }
 
-fn pdb_text(state: &PdbState) -> String {
+fn pdb_text(state: &PdbState, labels: &DumpLabels) -> String {
     match state {
-        PdbState::Loaded(n) => format!("PDB ok, {n} symbols"),
-        PdbState::Missing => "no PDB".into(),
-        PdbState::Mismatch => "PDB mismatch".into(),
-        PdbState::Unreadable(e) => format!("PDB unreadable: {e}"),
-        PdbState::NoIdentity => "no CodeView id".into(),
-        PdbState::NotLoaded => "symbols not loaded".into(),
+        PdbState::Loaded(n) => labels.pdb_ok.replace("{{n}}", &n.to_string()),
+        PdbState::Missing => labels.pdb_missing.clone(),
+        PdbState::Mismatch => labels.pdb_mismatch.clone(),
+        PdbState::Unreadable(e) => labels.pdb_unreadable.replace("{{e}}", e),
+        PdbState::NoIdentity => labels.pdb_noid.clone(),
+        PdbState::NotLoaded => labels.pdb_not_loaded.clone(),
     }
 }
 
-fn pdb_text_row(state: &PdbState, pal: &Palette) -> (String, Color32) {
+fn pdb_text_row(state: &PdbState, pal: &Palette, labels: &DumpLabels) -> (String, Color32) {
     match state {
-        PdbState::Loaded(n) => (format!("PDB ok, {n} symbols"), pal.ok),
-        PdbState::Missing => ("no PDB".into(), pal.weak),
-        PdbState::Mismatch => ("PDB mismatch".into(), pal.warn),
-        PdbState::Unreadable(e) => (format!("PDB unreadable: {e}"), pal.err),
-        PdbState::NoIdentity => ("no CodeView id".into(), pal.weak),
-        PdbState::NotLoaded => ("symbols not loaded".into(), pal.weak),
+        PdbState::Loaded(n) => (labels.pdb_ok.replace("{{n}}", &n.to_string()), pal.ok),
+        PdbState::Missing => (labels.pdb_missing.clone(), pal.weak),
+        PdbState::Mismatch => (labels.pdb_mismatch.clone(), pal.warn),
+        PdbState::Unreadable(e) => (labels.pdb_unreadable.replace("{{e}}", e), pal.err),
+        PdbState::NoIdentity => (labels.pdb_noid.clone(), pal.weak),
+        PdbState::NotLoaded => (labels.pdb_not_loaded.clone(), pal.weak),
     }
 }
 
 /// Plain-text rendering of the whole report, written next to the dump.
-fn report_text(r: &Report) -> String {
+fn report_text(r: &Report, labels: &DumpLabels) -> String {
     let mut out = String::new();
     out.push_str(&format!("dump: {}\nsize: {} bytes\n\n", r.dump_path, r.size));
     if let Some(e) = &r.exception {
@@ -731,12 +768,12 @@ fn report_text(r: &Report) -> String {
     out.push_str("modules:\n");
     for m in &r.modules {
         let pdb = match &m.pdb {
-            PdbState::Loaded(n) => format!("PDB ok ({n})"),
-            PdbState::Missing => "no PDB".into(),
-            PdbState::Mismatch => "PDB mismatch".into(),
-            PdbState::Unreadable(e) => format!("PDB unreadable: {e}"),
-            PdbState::NoIdentity => "no CodeView id".into(),
-            PdbState::NotLoaded => "symbols not loaded".into(),
+            PdbState::Loaded(n) => labels.pdb_ok.replace("{{n}}", &n.to_string()),
+            PdbState::Missing => labels.pdb_missing.clone(),
+            PdbState::Mismatch => labels.pdb_mismatch.clone(),
+            PdbState::Unreadable(e) => labels.pdb_unreadable.replace("{{e}}", e),
+            PdbState::NoIdentity => labels.pdb_noid.clone(),
+            PdbState::NotLoaded => labels.pdb_not_loaded.clone(),
         };
         out.push_str(&format!(
             "  {:<24} base 0x{:012X}  {:>9}  {}\n",
@@ -785,16 +822,24 @@ pub fn request_disassembly(
     module: usize,
     va: u64,
     count: usize,
+    manual_pdb: Option<PathBuf>,
 ) {
     let key = (dump.to_path_buf(), module, va, count);
-    if view.asm_key.as_ref() == Some(&key) {
+    if view.asm_key.as_ref() == Some(&key) && manual_pdb == view.manual_pdb {
         return;
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let p = dump.to_path_buf();
     let engine = engine_root.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(crashdump::disassemble_range(&p, &engine, module, va, count));
+        let _ = tx.send(crashdump::disassemble_range(
+            &p,
+            &engine,
+            module,
+            va,
+            count,
+            manual_pdb.as_deref(),
+        ));
     });
     view.asm_pending = Some(rx);
     view.asm_key = Some(key);

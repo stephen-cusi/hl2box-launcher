@@ -1961,7 +1961,6 @@ impl App {
             no_frames: self.tl("crash.no_frames"),
             modules: self.tl("crash.modules"),
             notes: self.tl("crash.notes"),
-            no_exception: self.tl("crash.no_exception"),
             explorer: self.tl("dumps.explorer"),
             explorer_hint: self.tl("dumps.explorer_hint"),
             go: self.tl("dumps.go"),
@@ -1969,6 +1968,21 @@ impl App {
             click_jump: self.tl("dumps.click_jump"),
             export: self.tl("logs.export"),
             exported: self.tl("logs.exported"),
+            thread: self.tl("crash.thread"),
+            params: self.tl("crash.params"),
+            unverified: self.tl("dumps.unverified"),
+            outside: self.tl("dumps.outside"),
+            no_exc: self.tl("crash.no_exception"),
+            pdb_ok: self.tl("crash.pdb_loaded"),
+            pdb_missing: self.tl("crash.pdb_missing"),
+            pdb_mismatch: self.tl("crash.pdb_mismatch"),
+            pdb_unreadable: self.tl("crash.pdb_unreadable"),
+            pdb_noid: self.tl("crash.pdb_noid"),
+            pdb_not_loaded: self.tl("crash.pdb_not_loaded"),
+            pick_pdb: self.tl("dumps.pick_pdb"),
+            pdb_forced_ok: self.tl("dumps.pdb_forced_ok"),
+            pdb_forced_mismatch: self.tl("dumps.pdb_forced_mismatch"),
+            symbols: self.tl("dumps.symbols"),
         };
         let mut note: Option<(String, bool)> = None;
         let mut action = dumpview::show(ui, &pal, &mut self.dumps, &engine, &labels, &mut note);
@@ -1979,6 +1993,15 @@ impl App {
         let dump_path = self.dumps.list.get(self.dumps.pick).map(|(_, p, _)| p.clone());
         match action {
             dumpview::Action::Nothing => {}
+            dumpview::Action::PickPdb => {
+                let title = self.tl("dumps.pick_pdb_title");
+                if let Some(pdb) = rfd::FileDialog::new().set_title(title).add_filter("pdb", &["pdb"]).pick_file() {
+                    self.dumps.manual_pdb = Some(pdb);
+                    // drop any window built with the old symbols
+                    self.dumps.asm = None;
+                    self.dumps.asm_key = None;
+                }
+            }
             dumpview::Action::Pick(i) => {
                 self.dumps.pick = i;
                 self.dumps.report = None;
@@ -1992,7 +2015,8 @@ impl App {
             dumpview::Action::Reload => self.refresh_dumps(),
             dumpview::Action::Disassemble(module, va, count) => {
                 if let Some(path) = dump_path {
-                    dumpview::request_disassembly(&mut self.dumps, &path, &engine, module, va, count);
+                    let manual = self.dumps.manual_pdb.clone();
+                    dumpview::request_disassembly(&mut self.dumps, &path, &engine, module, va, count, manual);
                 }
             }
         }

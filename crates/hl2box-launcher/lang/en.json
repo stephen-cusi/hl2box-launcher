@@ -251,5 +251,12 @@
   "crash.error": "could not analyse this dump: {{e}}",
   "crash.no_exception": "this dump has no exception record",
   "crash.pdb_not_loaded": "not on the fault or call path: symbols not loaded",
-  "crash.loading": "analysing the dump and loading symbols for the modules involved..."
+  "crash.loading": "analysing the dump and loading symbols for the modules involved...",
+  "dumps.unverified": "+ {{n}} stack slot(s) look like code but their call site is not captured",
+  "dumps.outside": "outside every loaded module",
+  "dumps.pick_pdb": "Pick PDB...",
+  "dumps.pick_pdb_title": "Choose a PDB for the selected module",
+  "dumps.pdb_forced_ok": "hand-picked PDB, {{n}} symbols",
+  "dumps.pdb_forced_mismatch": "hand-picked PDB, build differs (names may be wrong)",
+  "dumps.symbols": "{{n}} symbols"
 }

@@ -132,6 +132,9 @@ pub struct AsmRow {
     /// Memory the instruction touches, when it can be computed: the global
     /// for RIP-relative operands, the dereferenced address for register bases.
     pub target: Option<u64>,
+    /// `function+offset` for the instruction address, when a symbol table is
+    /// loaded for the module that owns it.
+    pub symbol: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +368,52 @@ pub fn load_pdb(path: &Path, guid: &[u8; 16]) -> Result<Vec<(u32, String)>, PdbS
     Ok(funcs)
 }
 
+/// Load the PDB the user picked by hand.  The module's CodeView GUID is the
+/// referee: a file from a different build still loads (the user asked for it)
+/// but the state says so, and the UI can show the warning.
+fn load_pdb_forced(path: &Path, module: &Module) -> (PdbState, Vec<(u32, String)>) {
+    let Some((guid, _)) = module.codeview else {
+        // no identity to check against: trust the user's choice
+        return match load_pdb_nocheck(path) {
+            Ok(funcs) => (PdbState::Loaded(funcs.len()), funcs),
+            Err(e) => (e, Vec::new()),
+        };
+    };
+    match load_pdb(path, &guid) {
+        Ok(funcs) => (PdbState::Loaded(funcs.len()), funcs),
+        Err(PdbState::Mismatch) => match load_pdb_nocheck(path) {
+            Ok(funcs) => (PdbState::Mismatch, funcs),
+            Err(e) => (e, Vec::new()),
+        },
+        Err(other) => (other, Vec::new()),
+    }
+}
+
+/// Parse a PDB without checking its GUID against anything.
+fn load_pdb_nocheck(path: &Path) -> Result<Vec<(u32, String)>, PdbState> {
+    let file = std::fs::File::open(path).map_err(|e| PdbState::Unreadable(e.to_string()))?;
+    let mut pdb = pdb::PDB::open(file).map_err(|e| PdbState::Unreadable(e.to_string()))?;
+    let address_map = pdb.address_map().map_err(|e| PdbState::Unreadable(e.to_string()))?;
+    let table = pdb.global_symbols().map_err(|e| PdbState::Unreadable(e.to_string()))?;
+    let mut funcs = Vec::new();
+    let mut iter = table.iter();
+    use pdb::FallibleIterator;
+    while let Ok(Some(sym)) = iter.next() {
+        if let Ok(pdb::SymbolData::Public(p)) = sym.parse() {
+            if !(p.code || p.function) {
+                continue;
+            }
+            let Some(rva) = p.offset.to_rva(&address_map) else { continue };
+            let raw = p.name.to_string().into_owned();
+            let name = msvc_demangler::demangle(&raw, DemangleFlags::llvm()).unwrap_or(raw);
+            funcs.push((rva.0, name));
+        }
+    }
+    funcs.sort_by_key(|(rva, _)| *rva);
+    funcs.dedup_by_key(|(rva, _)| *rva);
+    Ok(funcs)
+}
+
 /// Candidate PDB locations for a module: next to it in the engine tree
 /// (`hl2sb/bin`, `bin`) and at the path the dump recorded, re-rooted under
 /// the local engine folder.
@@ -501,7 +550,11 @@ fn disassemble(dump: &Dump, res: &Resolver, fault: u64, regs: &Registers) -> Vec
             None
         };
         let target = mem_target(ins, regs);
-        rows.push(AsmRow { address: ins.ip(), text, fault: ins.ip() == fault, note, target });
+        let symbol = res
+            .locate(ins.ip())
+            .and_then(|l| l.symbol)
+            .map(|(name, off)| format!("{name}+0x{off:X}"));
+        rows.push(AsmRow { address: ins.ip(), text, fault: ins.ip() == fault, note, target, symbol });
     }
     rows
 }
@@ -580,26 +633,6 @@ pub struct ModuleContext {
     pub symbols: Vec<(u32, String)>,
 }
 
-impl Report {
-    /// Everything needed to disassemble arbitrary addresses in one module.
-    pub fn module_context(&self, index: usize) -> Option<ModuleContext> {
-        let row = self.modules.get(index)?;
-        let symbols = match &row.pdb {
-            PdbState::Loaded(n) if *n > 0 => load_pdb_by_index(self, index).unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        Some(ModuleContext { index, module: row.module.clone(), pdb: row.pdb.clone(), symbols })
-    }
-}
-
-/// Re-read the symbol table for module `index` (Report keeps only rows).
-fn load_pdb_by_index(report: &Report, index: usize) -> Option<Vec<(u32, String)>> {
-    // The report does not carry the engine root; the UI supplies one through
-    // disassemble_in_module instead.  Kept for API symmetry.
-    let _ = (report, index);
-    None
-}
-
 /// Disassemble `count` instructions of code captured in the dump, starting
 /// near `va` (decoding walks back up to 64 bytes to find an instruction
 /// boundary, as the fault view does).  Rows carry the same annotations as
@@ -610,16 +643,23 @@ pub fn disassemble_range(
     module_index: usize,
     va: u64,
     count: usize,
+    manual_pdb: Option<&Path>,
 ) -> Result<(ModuleContext, Vec<AsmRow>, Option<Registers>), String> {
     let dump = Dump::open(dump_path)?;
     let modules = dump.modules();
     let module = modules
         .get(module_index)
         .ok_or_else(|| "module index out of range".to_string())?;
-    let (pdb, symbols) = resolve_pdb(engine_root, module);
+    let (pdb, symbols) = match manual_pdb {
+        Some(path) => load_pdb_forced(path, module),
+        None => resolve_pdb(engine_root, module),
+    };
     let ctx = ModuleContext { index: module_index, module: module.clone(), pdb, symbols };
 
-    let res = Resolver { modules, symbols: vec![ctx.symbols.clone()] };
+    // symbol tables are indexed by module index; only the explored module has one
+    let mut tables: Vec<Vec<(u32, String)>> = vec![Vec::new(); modules.len()];
+    tables[module_index] = ctx.symbols.clone();
+    let res = Resolver { modules, symbols: tables };
     let regs = dump.exception().and_then(|e| e.registers).unwrap_or_default();
 
     // capture the requested window plus lead-in for boundary finding; shrink
@@ -667,7 +707,11 @@ pub fn disassemble_range(
         fmt.format(&ins, &mut text);
         let note = memory_note(&dump, &res, &ins, &regs);
         let target = mem_target(&ins, &regs);
-        rows.push(AsmRow { address: ins.ip(), text, fault: false, note, target });
+        let symbol = res
+            .locate(ins.ip())
+            .and_then(|l| l.symbol)
+            .map(|(name, off)| format!("{name}+0x{off:X}"));
+        rows.push(AsmRow { address: ins.ip(), text, fault: false, note, target, symbol });
     }
     Ok((ctx, rows, Some(regs)))
 }
@@ -1056,10 +1100,13 @@ mod tests {
         let mods = d.modules();
         let mi = mods.iter().position(|m| rip >= m.base && rip < m.base + m.size).expect("rip in a module");
         let (ctx, rows, regs) = disassemble_range(
-            Path::new(&dump), Path::new(&engine), mi, rip, 12).expect("range");
+            Path::new(&dump), Path::new(&engine), mi, rip, 12, None).expect("range");
         eprintln!("module {} pdb {:?} rows {} (at RIP 0x{rip:X})", ctx.module.name, ctx.pdb, rows.len());
         let _ = regs;
-        for r in &rows { eprintln!("  0x{:X} {}", r.address, r.text); }
+        for r in &rows {
+            eprintln!("  0x{:X} {}{}", r.address, r.text,
+                r.symbol.as_ref().map(|s| format!("   ; {s}")).unwrap_or_default());
+        }
     }
 
     /// Runs only when HL2BOX_DUMP and HL2BOX_ENGINE point at real files:
