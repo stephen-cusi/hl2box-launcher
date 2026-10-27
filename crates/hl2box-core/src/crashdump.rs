@@ -570,6 +570,108 @@ fn is_call_site(dump: &Dump, ret: u64) -> bool {
         || (b[0] == 0xFF && b[1] == 0x15)
 }
 
+/// A region of one module: the module, its loaded symbol table (rva, name)
+/// and the PDB status, so the UI can label addresses the same way the report
+/// does without re-resolving the PDB.
+pub struct ModuleContext {
+    pub index: usize,
+    pub module: Module,
+    pub pdb: PdbState,
+    pub symbols: Vec<(u32, String)>,
+}
+
+impl Report {
+    /// Everything needed to disassemble arbitrary addresses in one module.
+    pub fn module_context(&self, index: usize) -> Option<ModuleContext> {
+        let row = self.modules.get(index)?;
+        let symbols = match &row.pdb {
+            PdbState::Loaded(n) if *n > 0 => load_pdb_by_index(self, index).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        Some(ModuleContext { index, module: row.module.clone(), pdb: row.pdb.clone(), symbols })
+    }
+}
+
+/// Re-read the symbol table for module `index` (Report keeps only rows).
+fn load_pdb_by_index(report: &Report, index: usize) -> Option<Vec<(u32, String)>> {
+    // The report does not carry the engine root; the UI supplies one through
+    // disassemble_in_module instead.  Kept for API symmetry.
+    let _ = (report, index);
+    None
+}
+
+/// Disassemble `count` instructions of code captured in the dump, starting
+/// near `va` (decoding walks back up to 64 bytes to find an instruction
+/// boundary, as the fault view does).  Rows carry the same annotations as
+/// the fault view: resolved globals, register dereferences, symbol names.
+pub fn disassemble_range(
+    dump_path: &Path,
+    engine_root: &Path,
+    module_index: usize,
+    va: u64,
+    count: usize,
+) -> Result<(ModuleContext, Vec<AsmRow>, Option<Registers>), String> {
+    let dump = Dump::open(dump_path)?;
+    let modules = dump.modules();
+    let module = modules
+        .get(module_index)
+        .ok_or_else(|| "module index out of range".to_string())?;
+    let (pdb, symbols) = resolve_pdb(engine_root, module);
+    let ctx = ModuleContext { index: module_index, module: module.clone(), pdb, symbols };
+
+    let res = Resolver { modules, symbols: vec![ctx.symbols.clone()] };
+    let regs = dump.exception().and_then(|e| e.registers).unwrap_or_default();
+
+    // capture the requested window plus lead-in for boundary finding; shrink
+    // the lead-in first when it crosses into memory the dump did not capture
+    // (page boundaries between sections are common).
+    const ROW_BYTES: u64 = 16;
+    let mut tail = (count as u64) * ROW_BYTES;
+    // forward tail first: shrink until the captured window fits
+    let mut have = None;
+    loop {
+        if let Some(b) = dump.read(va, tail as usize) {
+            have = Some(b.to_vec());
+            break;
+        }
+        if tail <= ROW_BYTES {
+            break;
+        }
+        tail -= ROW_BYTES;
+    }
+    // lead-in for boundary finding: shrink until read succeeds, then splice
+    let mut lead = 64u64;
+    let mut lead_bytes: Vec<u8> = Vec::new();
+    while lead > 0 {
+        if let Some(b) = dump.read(va - lead, lead as usize) {
+            lead_bytes = b.to_vec();
+            break;
+        }
+        lead -= 16;
+    }
+    let Some(tail_bytes) = have else {
+        return Ok((ctx, Vec::new(), Some(regs)));
+    };
+    let mut bytes = lead_bytes;
+    let start = va - lead;
+    bytes.extend_from_slice(&tail_bytes);
+    let mut dec = Decoder::with_ip(64, &bytes, start, DecoderOptions::NONE);
+    let mut rows: Vec<AsmRow> = Vec::new();
+    let mut fmt = IntelFormatter::new();
+    while dec.can_decode() && rows.len() < count {
+        let ins = dec.decode();
+        if ins.ip() < va {
+            continue; // lead-in only for boundary alignment
+        }
+        let mut text = String::new();
+        fmt.format(&ins, &mut text);
+        let note = memory_note(&dump, &res, &ins, &regs);
+        let target = mem_target(&ins, &regs);
+        rows.push(AsmRow { address: ins.ip(), text, fault: false, note, target });
+    }
+    Ok((ctx, rows, Some(regs)))
+}
+
 /// Full analysis: exception, modules with PDB status, disassembly, stack.
 /// Analyse a dump. Two passes: the first places every address without
 /// opening any PDB, the second opens PDBs only for the modules those
@@ -941,6 +1043,23 @@ mod tests {
 
         let other = [0xABu8; 16];
         assert_eq!(load_pdb(path, &other).err(), Some(PdbState::Mismatch));
+    }
+
+
+    #[test]
+    #[ignore]
+    fn real_disassemble_range() {
+        let (Ok(dump), Ok(engine)) = (std::env::var("HL2BOX_DUMP"), std::env::var("HL2BOX_ENGINE")) else { return };
+        let d = Dump::open(Path::new(&dump)).expect("open");
+        let exc = d.exception().expect("exception");
+        let rip = exc.registers.as_ref().and_then(|r| r.get("RIP")).expect("RIP");
+        let mods = d.modules();
+        let mi = mods.iter().position(|m| rip >= m.base && rip < m.base + m.size).expect("rip in a module");
+        let (ctx, rows, regs) = disassemble_range(
+            Path::new(&dump), Path::new(&engine), mi, rip, 12).expect("range");
+        eprintln!("module {} pdb {:?} rows {} (at RIP 0x{rip:X})", ctx.module.name, ctx.pdb, rows.len());
+        let _ = regs;
+        for r in &rows { eprintln!("  0x{:X} {}", r.address, r.text); }
     }
 
     /// Runs only when HL2BOX_DUMP and HL2BOX_ENGINE point at real files:

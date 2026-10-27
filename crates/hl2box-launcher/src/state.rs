@@ -29,6 +29,7 @@ use crate::i18n::{format as i18n_format, Catalog};
 use crate::logview::{self, LogAction, LogLabels, LogView};
 use crate::platform::{self, Theme, ThemeSetting};
 use crate::textview::{TextView, ViewLabels};
+use crate::dumpview;
 use crate::theme::{self, Palette};
 use crate::widgets;
 
@@ -40,16 +41,18 @@ pub enum Page {
     Workshop,
     Mounts,
     Logs,
+    Dumps,
     About,
 }
 
-const NAV: [(&str, Page); 7] = [
+const NAV: [(&str, Page); 8] = [
     ("nav.launch", Page::Launch),
     ("nav.player", Page::Player),
     ("nav.addons", Page::Addons),
     ("nav.workshop", Page::Workshop),
     ("nav.mounts", Page::Mounts),
     ("nav.logs", Page::Logs),
+    ("nav.dumps", Page::Dumps),
     ("nav.about", Page::About),
 ];
 
@@ -175,6 +178,9 @@ pub struct App {
     logs: LogView,
     log_reload_at: f64,
 
+    // Dumps
+    dumps: dumpview::DumpView,
+
     // Look and feel
     catalog: Catalog,
     locale: String,
@@ -274,6 +280,7 @@ impl App {
             log_pick: 0,
             logs: LogView::default(),
             log_reload_at: 0.0,
+            dumps: dumpview::DumpView::default(),
             catalog,
             locale,
             lang_setting_auto,
@@ -672,6 +679,7 @@ impl App {
                     Page::Addons => self.refresh_addons(),
                     Page::Mounts => self.refresh_mounts(),
                     Page::Logs => self.refresh_logs(),
+                    Page::Dumps => self.refresh_dumps(),
                     _ => {}
                 }
             }
@@ -1927,6 +1935,69 @@ impl App {
         }
     }
 
+    pub fn refresh_dumps(&mut self) {
+        let mod_root = self.paths().mod_root();
+        dumpview::refresh(&mut self.dumps, &mod_root);
+    }
+
+    fn page_dumps(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal;
+        if self.dumps.list.is_empty() && self.dumps.report.is_none() && self.dumps.error.is_none() {
+            self.refresh_dumps();
+        }
+        let engine = self.paths().engine_root;
+        let labels = dumpview::DumpLabels {
+            title: self.tl("dumps.title"),
+            subtitle: self.tl("dumps.subtitle"),
+            none: self.tl("dumps.none"),
+            open_folder: self.tl("logs.open_folder"),
+            refresh: self.tl("logs.refresh"),
+            analysing: self.tl("crash.loading"),
+            error: self.tl("crash.error"),
+            exception: self.tl("crash.exception"),
+            fault: self.tl("crash.fault"),
+            registers: self.tl("crash.registers"),
+            frames: self.tl("crash.frames"),
+            no_frames: self.tl("crash.no_frames"),
+            modules: self.tl("crash.modules"),
+            notes: self.tl("crash.notes"),
+            no_exception: self.tl("crash.no_exception"),
+            explorer: self.tl("dumps.explorer"),
+            explorer_hint: self.tl("dumps.explorer_hint"),
+            go: self.tl("dumps.go"),
+            no_code: self.tl("dumps.no_code"),
+            click_jump: self.tl("dumps.click_jump"),
+            export: self.tl("logs.export"),
+            exported: self.tl("logs.exported"),
+        };
+        let mut note: Option<(String, bool)> = None;
+        let mut action = dumpview::show(ui, &pal, &mut self.dumps, &engine, &labels, &mut note);
+        if let Some((text, ok)) = note {
+            if ok { self.ok(text); } else { self.err(text); }
+        }
+        // apply the action after `self.dumps` is free to mutate again
+        let dump_path = self.dumps.list.get(self.dumps.pick).map(|(_, p, _)| p.clone());
+        match action {
+            dumpview::Action::Nothing => {}
+            dumpview::Action::Pick(i) => {
+                self.dumps.pick = i;
+                self.dumps.report = None;
+                self.dumps.error = None;
+                self.dumps.key = None;
+                self.dumps.asm = None;
+                self.dumps.asm_key = None;
+                action = dumpview::Action::Nothing;
+                let _ = action;
+            }
+            dumpview::Action::Reload => self.refresh_dumps(),
+            dumpview::Action::Disassemble(module, va, count) => {
+                if let Some(path) = dump_path {
+                    dumpview::request_disassembly(&mut self.dumps, &path, &engine, module, va, count);
+                }
+            }
+        }
+    }
+
     fn page_about(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal;
         let title = self.tl("about.title");
@@ -2021,6 +2092,7 @@ impl eframe::App for App {
                 // these two lay out their own panels and scroll areas
                 Page::Addons => self.page_addons(ui, ctx.clone()),
                 Page::Logs => self.page_logs(ui),
+                Page::Dumps => self.page_dumps(ui),
                 _ => {
                     egui::ScrollArea::vertical()
                         .id_salt("page_scroll")

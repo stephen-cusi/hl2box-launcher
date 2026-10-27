@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dumpview;
 mod explorer;
 mod i18n;
 mod logview;
