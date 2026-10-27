@@ -264,5 +264,12 @@
   "dumps.note.no_registers": "the dump has no exception-time register context",
   "dumps.note.no_fault_code": "the code at the faulting instruction was not captured in the dump",
   "dumps.note.no_exception_stream": "this dump has no exception stream (not a crash dump)",
-  "dumps.note.no_verified_frames": "no return address could be verified: {{n}} stack candidate(s) point into loaded modules but their call sites are not captured, so the call chain is not shown"
+  "dumps.note.no_verified_frames": "no return address could be verified: {{n}} stack candidate(s) point into loaded modules but their call sites are not captured, so the call chain is not shown",
+  "dumps.src_handler": "dumps (crash handler)",
+  "dumps.src_wer": "dumps_wer (WER full dumps)",
+  "dumps.src_custom": "custom folder...",
+  "dumps.pick_folder": "Folder...",
+  "dumps.pick_folder_title": "Choose a dump folder",
+  "dumps.none_wer": "dumps_wer/ is empty - WER writes its full-memory dumps here when configured",
+  "dumps.none_custom": "this folder has no .mdmp / .dmp files"
 }

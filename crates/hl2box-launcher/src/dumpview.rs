@@ -52,6 +52,12 @@ pub struct DumpLabels {
     pub pdb_forced_ok: String,
     pub pdb_forced_mismatch: String,
     pub symbols: String,
+    pub src_handler: String,
+    pub src_wer: String,
+    pub src_custom: String,
+    pub pick_folder: String,
+    pub none_wer: String,
+    pub none_custom: String,
     pub note_av_no_target: String,
     pub note_no_registers: String,
     pub note_no_fault_code: String,
@@ -82,8 +88,9 @@ pub fn note_text(note: &hl2box_core::crashdump::Note, labels: &DumpLabels) -> St
 /// Everything the page remembers.
 #[derive(Default)]
 pub struct DumpView {
-    /// (title, path, exists), newest first; rebuilt by [`refresh`].
+    /// (file name, path, exists), newest first; rebuilt by [`refresh`].
     pub list: Vec<(String, PathBuf, bool)>,
+    pub source: DumpSource,
     pub pick: usize,
     pub report: Option<Report>,
     pub error: Option<String>,
@@ -110,11 +117,40 @@ pub struct DumpView {
     pub pdb_patch: Option<std::sync::mpsc::Receiver<Vec<PdbState>>>,
 }
 
-/// Re-scan both dump folders, newest first.
+/// Which folder the left list shows.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DumpSource {
+    #[default]
+    Handler,
+    Wer,
+    /// A folder the user picked; remembered in the config.
+    Custom(String),
+}
+
+/// Re-scan the folder the source points at, newest first.
 pub fn refresh(view: &mut DumpView, mod_root: &std::path::Path) {
     view.list.clear();
-    list_dir(view, mod_root.join("dumps"), "dumps");
-    list_dir(view, mod_root.join("dumps_wer"), "dumps_wer");
+    let dir: PathBuf = match &view.source {
+        DumpSource::Handler => mod_root.join("dumps"),
+        DumpSource::Wer => mod_root.join("dumps_wer"),
+        DumpSource::Custom(s) => {
+            if s.is_empty() {
+                view.pick = 0;
+                view.report = None;
+                view.error = None;
+                view.key = None;
+                view.asm = None;
+                view.asm_error = None;
+                view.asm_key = None;
+                view.pdb_resolved = false;
+                view.pdb_patch = None;
+                view.manual_pdb = None;
+                return;
+            }
+            PathBuf::from(s)
+        }
+    };
+    list_dir(view, &dir);
     if view.pick >= view.list.len() {
         view.pick = 0;
     }
@@ -129,8 +165,8 @@ pub fn refresh(view: &mut DumpView, mod_root: &std::path::Path) {
     view.manual_pdb = None;
 }
 
-fn list_dir(view: &mut DumpView, dir: PathBuf, title: &str) {
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
+fn list_dir(view: &mut DumpView, dir: &PathBuf) {
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -152,7 +188,7 @@ fn list_dir(view: &mut DumpView, dir: PathBuf, title: &str) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        view.list.push((format!("{title}: {name}"), p, true));
+        view.list.push((name, p.clone(), true));
     }
 }
 
@@ -165,6 +201,8 @@ pub enum Action {
     Disassemble(usize, u64, usize),
     /// Open a file dialog; the picked path becomes the selected module's PDB.
     PickPdb,
+    /// Open a folder dialog; the picked dir becomes the custom dump source.
+    PickFolder,
 }
 
 fn parse_addr(text: &str) -> Option<u64> {
@@ -199,8 +237,13 @@ pub fn show(
     widgets::page_header(ui, pal, &labels.title, Some(&labels.subtitle));
 
     if view.list.is_empty() {
+        let msg = match view.source {
+            DumpSource::Handler => labels.none.clone(),
+            DumpSource::Wer => labels.none_wer.clone(),
+            DumpSource::Custom(_) => labels.none_custom.clone(),
+        };
         widgets::card(ui, pal, |ui| {
-            ui.label(egui::RichText::new(&labels.none).color(pal.weak));
+            ui.label(egui::RichText::new(msg).color(pal.weak));
         });
         return action;
     }
@@ -276,25 +319,44 @@ pub fn show(
                         action = Action::Reload;
                     }
                 });
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    let current = match view.source {
+                        DumpSource::Handler => 0,
+                        DumpSource::Wer => 1,
+                        DumpSource::Custom(_) => 2,
+                    };
+                    let names = [&labels.src_handler, &labels.src_wer, &labels.src_custom];
+                    egui::ComboBox::from_id_salt("dump_source")
+                        .width(160.0)
+                        .selected_text(names[current].clone())
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(current == 0, &labels.src_handler).clicked() {
+                                view.source = DumpSource::Handler;
+                                action = Action::Reload;
+                            }
+                            if ui.selectable_label(current == 1, &labels.src_wer).clicked() {
+                                view.source = DumpSource::Wer;
+                                action = Action::Reload;
+                            }
+                            if ui.selectable_label(current == 2, &labels.src_custom).clicked() {
+                                view.source = DumpSource::Custom(String::new());
+                                action = Action::PickFolder;
+                            }
+                        });
+                    if matches!(view.source, DumpSource::Custom(_))
+                        && ui.small_button(&labels.pick_folder).clicked()
+                    {
+                        action = Action::PickFolder;
+                    }
+                });
+                ui.add_space(2.0);
                 egui::ScrollArea::both()
                     .id_salt("dump_files")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, (title, path, exists)) in view.list.iter().enumerate() {
-                            // group folder prefix on its own dim line, file name below
-                            let (group, name) = title
-                                .split_once(": ")
-                                .map(|(g, n)| (g.to_string(), n.to_string()))
-                                .unwrap_or_else(|| (String::new(), title.clone()));
-                            let mut label = egui::RichText::new(name);
-                            if i > 0 {
-                                if let Some((pg, _, _)) = view.list.get(i - 1) {
-                                    let pg = pg.split_once(": ").map(|x| x.0).unwrap_or("");
-                                    if pg != group {
-                                        label = label.heading().strong();
-                                    }
-                                }
-                            }
+                            let mut label = egui::RichText::new(title);
                             if !*exists {
                                 label = label.weak();
                             }

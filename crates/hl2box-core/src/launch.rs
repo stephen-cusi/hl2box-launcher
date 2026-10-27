@@ -37,6 +37,9 @@ pub struct LauncherConfig {
     /// Named sets of extra args + start map, managed from the launch page.
     #[serde(default)]
     pub presets: Vec<LaunchPreset>,
+    /// Extra dump folder shown on the dumps page (empty = the two defaults).
+    #[serde(default)]
+    pub dumps_dir: String,
 }
 
 /// A saved launch setting: extra command line and start map under one name.
@@ -95,6 +98,7 @@ impl Default for LauncherConfig {
             language: default_lang(),
             theme: default_theme(),
             presets: Vec::new(),
+            dumps_dir: String::new(),
         }
     }
 }

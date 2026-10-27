@@ -1949,6 +1949,12 @@ impl App {
 
     fn page_dumps(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal;
+        // the custom folder rides the config; sync it into the view
+        let cfg_dir = self.cfg.dumps_dir.clone();
+        match &mut self.dumps.source {
+            dumpview::DumpSource::Custom(s) => *s = cfg_dir.clone(),
+            _ => {}
+        }
         if self.dumps.list.is_empty() && self.dumps.report.is_none() && self.dumps.error.is_none() {
             self.refresh_dumps();
         }
@@ -1957,6 +1963,12 @@ impl App {
             title: self.tl("dumps.title"),
             subtitle: self.tl("dumps.subtitle"),
             none: self.tl("dumps.none"),
+            src_handler: self.tl("dumps.src_handler"),
+            src_wer: self.tl("dumps.src_wer"),
+            src_custom: self.tl("dumps.src_custom"),
+            pick_folder: self.tl("dumps.pick_folder"),
+            none_wer: self.tl("dumps.none_wer"),
+            none_custom: self.tl("dumps.none_custom"),
             open_folder: self.tl("logs.open_folder"),
             refresh: self.tl("logs.refresh"),
             analysing: self.tl("crash.loading"),
@@ -2044,6 +2056,19 @@ impl App {
                     // drop any window built with the old symbols
                     self.dumps.asm = None;
                     self.dumps.asm_key = None;
+                }
+            }
+            dumpview::Action::PickFolder => {
+                let title = self.tl("dumps.pick_folder_title");
+                if let Some(dir) = rfd::FileDialog::new().set_title(title).pick_folder() {
+                    if matches!(self.dumps.source, dumpview::DumpSource::Custom(_)) {
+                        self.dumps.source = dumpview::DumpSource::Custom(dir.to_string_lossy().into_owned());
+                    }
+                    self.cfg.dumps_dir = dir.to_string_lossy().into_owned();
+                    if let Err(e) = self.cfg.save() {
+                        self.err(e.to_string());
+                    }
+                    self.refresh_dumps();
                 }
             }
             dumpview::Action::Pick(i) => {

@@ -264,5 +264,12 @@
   "dumps.note.no_registers": "dump 中没有异常时的寄存器上下文",
   "dumps.note.no_fault_code": "出错指令处的代码未被 dump 捕获",
   "dumps.note.no_exception_stream": "该 dump 没有异常流（不是崩溃转储）",
-  "dumps.note.no_verified_frames": "无法验证任何返回地址：{{n}} 个栈候选指向已加载模块，但其调用点未被捕获，因此不显示调用链"
+  "dumps.note.no_verified_frames": "无法验证任何返回地址：{{n}} 个栈候选指向已加载模块，但其调用点未被捕获，因此不显示调用链",
+  "dumps.src_handler": "dumps（崩溃处理器）",
+  "dumps.src_wer": "dumps_wer（WER 全内存）",
+  "dumps.src_custom": "自定义文件夹...",
+  "dumps.pick_folder": "选文件夹...",
+  "dumps.pick_folder_title": "选择 dump 文件夹",
+  "dumps.none_wer": "dumps_wer/ 是空的 - 配置 WER 后其全内存 dump 会写在这里",
+  "dumps.none_custom": "该文件夹没有 .mdmp / .dmp 文件"
 }
