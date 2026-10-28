@@ -61,8 +61,16 @@ type DownloadResult = Result<(String, u64), String>;
 
 enum Job {
     Idle,
+    /// Looking an item up on the Web API (off the UI thread).
+    Fetching {
+        id: String,
+        done: Receiver<Result<workshop::WorkshopDetails, String>>,
+        started: f64,
+    },
     Downloading {
         id: String,
+        /// True when the item goes through SteamCMD (no byte progress).
+        via_steamcmd: bool,
         progress: Progress,
         done: Receiver<DownloadResult>,
         started: f64,
@@ -608,6 +616,25 @@ impl App {
 
     /// Pull progress and completion from the download thread.
     fn poll_job(&mut self) {
+        if let Job::Fetching { done, .. } = &self.job {
+            match done.try_recv() {
+                Ok(Ok(d)) => {
+                    self.workshop_details = Some(d);
+                    self.job = Job::Idle;
+                }
+                Ok(Err(e)) => {
+                    self.workshop_details = None;
+                    self.job = Job::Idle;
+                    let msg = format!("workshop: {e}");
+                    self.err(msg);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.job = Job::Idle;
+                }
+            }
+            return;
+        }
         let Job::Downloading { done, .. } = &self.job else { return };
         let Ok(res) = done.try_recv() else { return };
         match res {
@@ -625,30 +652,77 @@ impl App {
         self.job = Job::Idle;
     }
 
-    fn start_download(&mut self) {
+    /// Look the typed id up in the background.
+    fn start_fetch(&mut self) {
         let Ok(id) = workshop::extract_workshop_id(&self.workshop_input) else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_id = id.clone();
+        std::thread::spawn(move || {
+            let res = workshop::fetch_details(&worker_id).map_err(|e| e.0);
+            let _ = tx.send(res);
+        });
+        self.job = Job::Fetching { id, done: rx, started: self.now };
+    }
+
+    /// Download the fetched item by whichever route it has.
+    fn start_download(&mut self) {
+        let Some(details) = self.workshop_details.clone() else { return };
+        let id = details.publishedfileid.clone();
+        let via_steamcmd = workshop::route(&details) == workshop::Route::SteamCmd;
+        let steamcmd = if via_steamcmd {
+            match workshop::find_steamcmd(&self.cfg.steamcmd_path) {
+                Some(p) => Some(p),
+                None => {
+                    let msg = self.tl("workshop.steamcmd_missing");
+                    self.err(msg);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let progress: Progress = Arc::new(Mutex::new((0, None)));
         let progress_worker = Arc::clone(&progress);
         let paths = self.paths();
-        let id_worker = id.clone();
+        let worker_id = id.clone();
         std::thread::spawn(move || {
             let result = (|| -> DownloadResult {
-                let d = workshop::fetch_details(&id_worker).map_err(|e| e.0)?;
-                let stem = sanitize_stem(&d.title, &id_worker);
-                let dest = gameinfo::unique_addon_path(&paths, &stem);
-                let n = workshop::download_to(&d, &dest, |done, total| {
-                    if let Ok(mut p) = progress_worker.lock() {
-                        *p = (done, total);
+                let stem = sanitize_stem(&details.title, &worker_id);
+                match steamcmd {
+                    None => {
+                        let dest = gameinfo::unique_addon_path(&paths, &stem);
+                        let n = workshop::download_direct(&details, &dest, |done, total| {
+                            if let Ok(mut p) = progress_worker.lock() {
+                                *p = (done, total);
+                            }
+                        })
+                        .map_err(|e| e.0)?;
+                        Ok((dest.to_string_lossy().into_owned(), n))
                     }
-                })
-                .map_err(|e| e.0)?;
-                Ok((dest.to_string_lossy().into_owned(), n))
+                    Some(exe) => {
+                        let work = std::env::temp_dir()
+                            .join(format!("hl2box-steamcmd-{worker_id}-{}", std::process::id()));
+                        let file = workshop::steamcmd_download(
+                            &exe,
+                            &worker_id,
+                            &work,
+                            workshop::STEAMCMD_TIMEOUT,
+                        )
+                        .map_err(|e| e.0)?;
+                        workshop::check_gma(&file).map_err(|e| e.0)?;
+                        let dest = gameinfo::unique_addon_path(&paths, &stem);
+                        let n = std::fs::copy(&file, &dest).map_err(|e| e.to_string())?;
+                        let _ = std::fs::remove_dir_all(&work);
+                        Ok((dest.to_string_lossy().into_owned(), n))
+                    }
+                }
             })();
             let _ = tx.send(result);
         });
         self.job = Job::Downloading {
             id,
+            via_steamcmd,
             progress,
             done: rx,
             started: self.now,
@@ -1662,8 +1736,13 @@ impl App {
         let details_label = self.tl("workshop.details");
         let dl_label = self.tl("workshop.download");
         let input_hint = self.tl("workshop.input_hint");
+        let busy = !matches!(self.job, Job::Idle);
         let parse_ok = workshop::extract_workshop_id(&self.workshop_input).is_ok();
 
+        // ---- lookup + steamcmd setting
+        let fetching = matches!(self.job, Job::Fetching { .. });
+        let mut want_fetch = false;
+        let mut picked_steamcmd: Option<String> = None;
         widgets::card(ui, &pal, |ui| {
             widgets::section(ui, &pal, &details_label);
             ui.label(hint1);
@@ -1675,70 +1754,136 @@ impl App {
                         .hint_text(input_hint)
                         .desired_width(480.0),
                 );
-                let fetch = ui.add_enabled(parse_ok, egui::Button::new(&details_label));
+                let fetch = ui.add_enabled(parse_ok && !busy, egui::Button::new(&details_label));
                 if fetch.clicked() {
-                    match workshop::extract_workshop_id(&self.workshop_input).and_then(|id| workshop::fetch_details(&id)) {
-                        Ok(d) => self.workshop_details = Some(d),
-                        Err(e) => {
-                            self.workshop_details = None;
-                            let msg = format!("workshop: {e}");
-                            self.err(msg);
-                        }
-                    }
+                    want_fetch = true;
+                }
+                if fetching {
+                    ui.spinner();
                 }
             });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.t("workshop.steamcmd_label")).color(pal.weak));
+                let hint = self.tl("workshop.steamcmd_hint");
+                let edit = egui::TextEdit::singleline(&mut self.cfg.steamcmd_path)
+                    .hint_text(hint)
+                    .desired_width(380.0);
+                let changed = ui.add(edit).changed();
+                if ui.button(self.tl("workshop.steamcmd_pick")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_file() {
+                        self.cfg.steamcmd_path = p.to_string_lossy().into_owned();
+                        picked_steamcmd = Some(self.cfg.steamcmd_path.clone());
+                    }
+                }
+                if changed {
+                    picked_steamcmd = Some(self.cfg.steamcmd_path.clone());
+                }
+            });
+            // what the launcher will actually run
+            match workshop::find_steamcmd(&self.cfg.steamcmd_path) {
+                Some(p) => {
+                    let text = self.tf("workshop.steamcmd_found", &[("path", &p.to_string_lossy())]);
+                    ui.label(RichText::new(text).small().color(pal.ok));
+                }
+                None => {
+                    let text = self.tl("workshop.steamcmd_missing_short");
+                    ui.label(RichText::new(text).small().color(pal.weak));
+                }
+            }
         });
+        if picked_steamcmd.is_some() {
+            self.save_cfg();
+        }
+        if want_fetch {
+            self.start_fetch();
+        }
 
+        // ---- details
         if let Some(d) = self.workshop_details.clone() {
             ui.add_space(10.0);
+            let route = match workshop::route(&d) {
+                workshop::Route::Direct => self.tl("workshop.route_direct"),
+                workshop::Route::SteamCmd => self.tl("workshop.route_steamcmd"),
+            };
             widgets::card(ui, &pal, |ui| {
                 let rows = vec![
                     (self.tl("workshop.meta.title"), d.title.clone(), false),
                     (self.tl("workshop.meta.id"), d.publishedfileid.clone(), true),
                     (
                         self.tl("workshop.meta.size"),
-                        d.file_size.parse::<u64>().map(explorer::human_size).unwrap_or_else(|_| d.file_size.clone()),
+                        d.file_size.parse::<u64>().map(explorer::human_size).unwrap_or_else(|_| {
+                            if d.file_size.is_empty() { "-".into() } else { d.file_size.clone() }
+                        }),
                         false,
                     ),
                     (self.tl("workshop.meta.updated"), format_unix(d.time_updated), false),
                     (self.tl("workshop.meta.creator"), d.creator.clone(), true),
+                    (self.tl("workshop.meta.route"), route, false),
                 ];
                 widgets::kv_grid(ui, &pal, "ws_details", &rows);
             });
         }
 
+        // ---- download
         ui.add_space(10.0);
         widgets::card(ui, &pal, |ui| {
             match &self.job {
                 Job::Idle => {
                     ui.horizontal(|ui| {
-                        let can = parse_ok && self.workshop_details.is_some();
+                        let route_ready = match &self.workshop_details {
+                            Some(d) if workshop::route(d) == workshop::Route::SteamCmd => {
+                                workshop::find_steamcmd(&self.cfg.steamcmd_path).is_some()
+                            }
+                            Some(_) => true,
+                            None => false,
+                        };
+                        let can = self.workshop_details.is_some() && route_ready;
                         if ui.add_enabled(can, widgets::primary(&pal, dl_label)).clicked() {
                             self.start_download();
                         }
-                        if !can {
+                        if self.workshop_details.is_none() {
                             ui.label(RichText::new(self.t("workshop.need_details")).color(pal.weak));
+                        } else if !route_ready {
+                            ui.label(RichText::new(self.t("workshop.steamcmd_missing")).color(pal.warn));
                         }
                     });
                 }
-                Job::Downloading { id, progress, .. } => {
-                    let (done, total) = *progress.lock().unwrap_or_else(|p| p.into_inner());
+                Job::Fetching { id, .. } => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(self.tf("workshop.fetching", &[("id", id)]));
+                    });
+                }
+                Job::Downloading { id, via_steamcmd, progress, .. } => {
                     let elapsed = self.now - self.job_started();
                     ui.label(self.tf("workshop.downloading", &[("id", id)]));
-                    match total {
-                        Some(t) if t > 0 => {
-                            let frac = (done as f32 / t as f32).clamp(0.0, 1.0);
-                            ui.add(
-                                egui::ProgressBar::new(frac)
-                                    .show_percentage()
-                                    .text(format!("{} / {}", explorer::human_size(done), explorer::human_size(t))),
-                            );
-                        }
-                        _ => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.weak(format!("{} ({:.0}s)", explorer::human_size(done), elapsed));
-                            });
+                    if *via_steamcmd {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.weak(format!("{} ({:.0}s)", self.t("workshop.steamcmd_running"), elapsed));
+                        });
+                    } else {
+                        let (done, total) = *progress.lock().unwrap_or_else(|p| p.into_inner());
+                        match total {
+                            Some(t) if t > 0 => {
+                                let frac = (done as f32 / t as f32).clamp(0.0, 1.0);
+                                ui.add(
+                                    egui::ProgressBar::new(frac)
+                                        .show_percentage()
+                                        .text(format!(
+                                            "{} / {}",
+                                            explorer::human_size(done),
+                                            explorer::human_size(t)
+                                        )),
+                                );
+                            }
+                            _ => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.weak(format!("{} ({:.0}s)", explorer::human_size(done), elapsed));
+                                });
+                            }
                         }
                     }
                     ctx_repaint(ui);
@@ -1749,7 +1894,7 @@ impl App {
 
     fn job_started(&self) -> f64 {
         match &self.job {
-            Job::Downloading { started, .. } => *started,
+            Job::Downloading { started, .. } | Job::Fetching { started, .. } => *started,
             Job::Idle => self.now,
         }
     }

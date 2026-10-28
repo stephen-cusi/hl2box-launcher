@@ -271,5 +271,16 @@
   "dumps.pick_folder": "Folder...",
   "dumps.pick_folder_title": "Choose a dump folder",
   "dumps.none_wer": "dumps_wer/ is empty - WER writes its full-memory dumps here when configured",
-  "dumps.none_custom": "this folder has no .mdmp / .dmp files"
+  "dumps.none_custom": "this folder has no .mdmp / .dmp files",
+  "workshop.steamcmd_label": "steamcmd",
+  "workshop.steamcmd_hint": "steamcmd.exe / steamcmd.sh or its folder",
+  "workshop.steamcmd_pick": "Browse...",
+  "workshop.steamcmd_found": "steamcmd found: {{path}}",
+  "workshop.steamcmd_missing_short": "steamcmd not found: needed only for items without a direct download link",
+  "workshop.steamcmd_missing": "this item needs steamcmd, and none was found. Set its path above.",
+  "workshop.route_direct": "direct download link (fast, no steamcmd)",
+  "workshop.route_steamcmd": "anonymous steamcmd (no direct link)",
+  "workshop.meta.route": "route",
+  "workshop.fetching": "looking up item {{id}}...",
+  "workshop.steamcmd_running": "steamcmd is downloading the item; the first run also updates steamcmd and can take minutes"
 }

@@ -351,8 +351,11 @@ pub fn show(
                     }
                 });
                 ui.add_space(2.0);
+                // leave room under the list for the folder button
+                let list_h = (ui.available_height() - 36.0).max(80.0);
                 egui::ScrollArea::both()
                     .id_salt("dump_files")
+                    .max_height(list_h)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, (title, path, exists)) in view.list.iter().enumerate() {
@@ -790,8 +793,10 @@ fn collect_asm(
         .max_height(if id == "fault" { 240.0 } else { 420.0 })
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            // One column: the note sits under its instruction and wraps to the
+            // page width, so it is never cut off or hidden behind a scrollbar.
             egui::Grid::new(format!("asm_grid_{id}"))
-                .num_columns(2)
+                .num_columns(1)
                 .spacing([14.0, 1.0])
                 .show(ui, |ui| {
                     for row in rows {
@@ -814,15 +819,19 @@ fn collect_asm(
                                 jumps.push((mi, row.address));
                             }
                         }
-                        if let Some(note) = &row.note {
-                            ui.label(
-                                egui::RichText::new(format!("; {note}"))
-                                    .monospace()
-                                    .small()
-                                    .color(pal.accent),
-                            );
-                        }
                         ui.end_row();
+                        if let Some(note) = &row.note {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("    ; {note}"))
+                                        .monospace()
+                                        .small()
+                                        .color(pal.accent),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            ui.end_row();
+                        }
                     }
                 });
         });

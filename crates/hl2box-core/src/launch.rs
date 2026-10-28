@@ -40,6 +40,10 @@ pub struct LauncherConfig {
     /// Extra dump folder shown on the dumps page (empty = the two defaults).
     #[serde(default)]
     pub dumps_dir: String,
+    /// SteamCMD for workshop items that have no direct download link. A file
+    /// or a folder containing it; empty = look on PATH.
+    #[serde(default)]
+    pub steamcmd_path: String,
 }
 
 /// A saved launch setting: extra command line and start map under one name.
@@ -99,6 +103,7 @@ impl Default for LauncherConfig {
             theme: default_theme(),
             presets: Vec::new(),
             dumps_dir: String::new(),
+            steamcmd_path: String::new(),
         }
     }
 }

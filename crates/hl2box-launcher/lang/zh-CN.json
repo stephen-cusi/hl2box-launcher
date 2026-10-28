@@ -271,5 +271,16 @@
   "dumps.pick_folder": "选文件夹...",
   "dumps.pick_folder_title": "选择 dump 文件夹",
   "dumps.none_wer": "dumps_wer/ 是空的 - 配置 WER 后其全内存 dump 会写在这里",
-  "dumps.none_custom": "该文件夹没有 .mdmp / .dmp 文件"
+  "dumps.none_custom": "该文件夹没有 .mdmp / .dmp 文件",
+  "workshop.steamcmd_label": "steamcmd",
+  "workshop.steamcmd_hint": "steamcmd.exe / steamcmd.sh 或其所在文件夹",
+  "workshop.steamcmd_pick": "浏览...",
+  "workshop.steamcmd_found": "已找到 steamcmd：{{path}}",
+  "workshop.steamcmd_missing_short": "未找到 steamcmd：只有没有直链的条目需要它",
+  "workshop.steamcmd_missing": "这个条目需要 steamcmd，但没有找到。请在上面设置路径。",
+  "workshop.route_direct": "直链下载（快，不需要 steamcmd）",
+  "workshop.route_steamcmd": "匿名 steamcmd（无直链）",
+  "workshop.meta.route": "下载方式",
+  "workshop.fetching": "正在查询条目 {{id}}...",
+  "workshop.steamcmd_running": "steamcmd 正在下载；首次运行还会更新 steamcmd，可能需要几分钟"
 }
