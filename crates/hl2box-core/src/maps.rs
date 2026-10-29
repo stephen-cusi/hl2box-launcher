@@ -23,6 +23,19 @@ pub fn list_maps(paths: &Paths) -> Vec<String> {
     set.into_iter().collect()
 }
 
+/// Where a listed map lives: the mod's `maps/` first, then the base game's
+/// `hl2/maps/` under the engine root.
+pub fn map_path(paths: &Paths, name: &str) -> Option<std::path::PathBuf> {
+    if !valid_map_name(name) {
+        return None;
+    }
+    let candidates = [
+        paths.mod_root().join("maps").join(format!("{name}.bsp")),
+        paths.engine_root.join("hl2").join("maps").join(format!("{name}.bsp")),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 fn collect(dir: &Path, out: &mut BTreeSet<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for ent in rd.flatten() {
@@ -41,6 +54,22 @@ fn collect(dir: &Path, out: &mut BTreeSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_path_prefers_the_mod_and_rejects_bad_names() {
+        let base = std::env::temp_dir().join("hl2box_map_path_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let paths = Paths::new(&base, "hl2sb");
+        std::fs::create_dir_all(paths.mod_root().join("maps")).unwrap();
+        std::fs::create_dir_all(base.join("hl2").join("maps")).unwrap();
+        std::fs::write(base.join("hl2").join("maps").join("d1.bsp"), b"x").unwrap();
+        assert_eq!(map_path(&paths, "d1"), Some(base.join("hl2").join("maps").join("d1.bsp")));
+        std::fs::write(paths.mod_root().join("maps").join("d1.bsp"), b"y").unwrap();
+        assert_eq!(map_path(&paths, "d1"), Some(paths.mod_root().join("maps").join("d1.bsp")));
+        assert_eq!(map_path(&paths, "../etc"), None);
+        assert_eq!(map_path(&paths, "missing"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn lists_both_folders_and_skips_bad_names() {

@@ -30,6 +30,8 @@ use crate::logview::{self, LogAction, LogLabels, LogView};
 use crate::platform::{self, Theme, ThemeSetting};
 use crate::textview::{TextView, ViewLabels};
 use crate::dumpview;
+use hl2box_core::bsp::{self, BspInfo, EntityState};
+use hl2box_core::vpk::{self, VpkListing};
 use crate::theme::{self, Palette};
 use crate::widgets;
 
@@ -40,17 +42,19 @@ pub enum Page {
     Addons,
     Workshop,
     Mounts,
+    Maps,
     Logs,
     Dumps,
     About,
 }
 
-const NAV: [(&str, Page); 8] = [
+const NAV: [(&str, Page); 9] = [
     ("nav.launch", Page::Launch),
     ("nav.player", Page::Player),
     ("nav.addons", Page::Addons),
     ("nav.workshop", Page::Workshop),
     ("nav.mounts", Page::Mounts),
+    ("nav.maps", Page::Maps),
     ("nav.logs", Page::Logs),
     ("nav.dumps", Page::Dumps),
     ("nav.about", Page::About),
@@ -204,6 +208,15 @@ pub struct App {
     maps: Vec<String>,
     preset_pick: usize,
     preset_name: String,
+    // Maps page: selection and the parsed header of the selected map
+    maps_sel: String,
+    maps_filter: String,
+    map_info: Option<(String, Result<BspInfo, String>)>,
+    // Mounts page: VPK viewer
+    vpk_game: usize,
+    vpk_pick: usize,
+    vpk_filter: String,
+    vpk_cache: Option<(std::path::PathBuf, Result<VpkListing, String>)>,
 }
 
 /// Directory holding the json language files: `lang/` next to the executable,
@@ -300,6 +313,13 @@ impl App {
             maps: Vec::new(),
             preset_pick: 0,
             preset_name: String::new(),
+            maps_sel: String::new(),
+            maps_filter: String::new(),
+            map_info: None,
+            vpk_game: 0,
+            vpk_pick: 0,
+            vpk_filter: String::new(),
+            vpk_cache: None,
         };
         app.refresh_addons();
         app.refresh_mounts();
@@ -752,6 +772,7 @@ impl App {
                 match page {
                     Page::Addons => self.refresh_addons(),
                     Page::Mounts => self.refresh_mounts(),
+                    Page::Maps => self.refresh_maps(),
                     Page::Logs => self.refresh_logs(),
                     Page::Dumps => self.refresh_dumps(),
                     _ => {}
@@ -1989,6 +2010,264 @@ impl App {
         });
     }
 
+    /// Maps: every map the launcher can find, and the header of the selected one.
+    fn page_maps(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal;
+        let title = self.tl("maps.title");
+        let subtitle = self.tl("maps.subtitle");
+        widgets::page_header(ui, &pal, &title, Some(&subtitle));
+        if self.maps.is_empty() {
+            let none = self.tl("maps.none");
+            widgets::card(ui, &pal, |ui| ui.label(RichText::new(none).color(pal.weak)));
+            return;
+        }
+        // keep a valid selection
+        if !self.maps.contains(&self.maps_sel) {
+            self.maps_sel = self.maps[0].clone();
+        }
+
+        let filter_label = self.tl("maps.filter");
+        let mut picked: Option<String> = None;
+        egui::SidePanel::left("maps_list_panel")
+            .resizable(true)
+            .width_range(200.0..=360.0)
+            .default_width(240.0)
+            .frame(egui::Frame::new())
+            .show_inside(ui, |ui| {
+                widgets::card(ui, &pal, |ui| {
+                    ui.set_min_height(ui.available_height() - 4.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.maps_filter)
+                            .hint_text(filter_label)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(4.0);
+                    let needle = self.maps_filter.trim().to_lowercase();
+                    egui::ScrollArea::vertical()
+                        .id_salt("maps_names")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for name in &self.maps {
+                                if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
+                                    continue;
+                                }
+                                let on = *name == self.maps_sel;
+                                if ui.add(egui::SelectableLabel::new(on, name.as_str())).clicked() {
+                                    picked = Some(name.clone());
+                                }
+                            }
+                        });
+                });
+            });
+        if let Some(name) = picked {
+            self.maps_sel = name;
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(Margin { left: 12, right: 0, top: 0, bottom: 0 }))
+            .show_inside(ui, |ui| {
+                widgets::card(ui, &pal, |ui| {
+                    ui.set_min_height(ui.available_height() - 4.0);
+                    self.map_detail(ui);
+                });
+            });
+    }
+
+    /// Parse the selected map once; re-parse only when the selection changes.
+    fn map_detail(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal;
+        let name = self.maps_sel.clone();
+        if !matches!(&self.map_info, Some((n, _)) if *n == name) {
+            let res = match hl2box_core::maps::map_path(&self.paths(), &name) {
+                Some(path) => bsp::read_info(&path).map_err(|e| e.0),
+                None => Err(self.tl("maps.missing")),
+            };
+            self.map_info = Some((name.clone(), res));
+        }
+        let Some((_, res)) = &self.map_info else { return };
+        ui.label(RichText::new(&name).heading().strong());
+        let info = match res {
+            Ok(info) => info.clone(),
+            Err(e) => {
+                widgets::status_text(ui, pal.err, e);
+                return;
+            }
+        };
+        let path = hl2box_core::maps::map_path(&self.paths(), &name)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ent_text = match &info.entities {
+            EntityState::Stats(st) => self.tf("maps.entities_n", &[("n", &st.count.to_string())]),
+            EntityState::Compressed => self.tl("maps.entities_compressed"),
+            EntityState::Empty => self.tl("maps.entities_none"),
+        };
+        let rows = vec![
+            (self.tl("maps.path"), path, true),
+            (self.tl("maps.version"), info.version.to_string(), true),
+            (self.tl("maps.revision"), info.map_revision.to_string(), true),
+            (self.tl("maps.lumps"), info.lumps.len().to_string(), true),
+            (self.tl("maps.entities"), ent_text, false),
+        ];
+        widgets::kv_grid(ui, &pal, "map_meta", &rows);
+        ui.add_space(8.0);
+
+        if let EntityState::Stats(st) = &info.entities {
+            if !st.classes.is_empty() {
+                widgets::section(ui, &pal, &self.tl("maps.classes"));
+                egui::Grid::new("map_classes").num_columns(2).spacing([18.0, 2.0]).show(ui, |ui| {
+                    for (class, n) in &st.classes {
+                        ui.monospace(class);
+                        ui.monospace(n.to_string());
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        }
+
+        widgets::section(ui, &pal, &self.tl("maps.lump_table"));
+        egui::ScrollArea::vertical()
+            .id_salt("map_lumps")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("map_lump_grid").num_columns(5).spacing([14.0, 2.0]).show(ui, |ui| {
+                    for h in ["#", "name", "offset", "length", "version"] {
+                        ui.label(RichText::new(h).color(pal.weak));
+                    }
+                    ui.end_row();
+                    for l in &info.lumps {
+                        ui.monospace(l.index.to_string());
+                        let n = bsp::lump_name(l.index);
+                        ui.label(if n.is_empty() { "-" } else { n });
+                        ui.monospace(format!("0x{:08X}", l.offset));
+                        ui.monospace(crate::explorer::human_size(l.length as u64));
+                        ui.monospace(l.version.to_string());
+                        ui.end_row();
+                    }
+                });
+            });
+    }
+
+    /// VPK viewer on the Mounts page: pick a mounted game and one of its
+    /// archives, then search the file list. Reads only the directory.
+    fn page_vpk(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal;
+        let title = self.tl("vpk.title");
+        let hint = self.tl("vpk.hint");
+        widgets::card(ui, &pal, |ui| {
+            widgets::section(ui, &pal, &title);
+            ui.label(RichText::new(hint).small().color(pal.weak));
+            if self.mounts.is_empty() {
+                ui.label(RichText::new(self.tl("vpk.none_games")).color(pal.weak));
+                return;
+            }
+            if self.vpk_game >= self.mounts.len() {
+                self.vpk_game = 0;
+            }
+            let games: Vec<String> = self.mounts.iter().map(|m| m.dir.clone()).collect();
+            let vpks = self.mounts[self.vpk_game].vpks.clone();
+            if vpks.is_empty() {
+                ui.label(RichText::new(self.tl("vpk.none_files")).color(pal.weak));
+                return;
+            }
+            if self.vpk_pick >= vpks.len() {
+                self.vpk_pick = 0;
+            }
+            let mut game_pick = self.vpk_game;
+            let mut file_pick = self.vpk_pick;
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_id_salt("vpk_game")
+                    .width(160.0)
+                    .selected_text(games[self.vpk_game].clone())
+                    .show_ui(ui, |ui| {
+                        for (i, g) in games.iter().enumerate() {
+                            if ui.selectable_label(i == game_pick, g).clicked() {
+                                game_pick = i;
+                            }
+                        }
+                    });
+                egui::ComboBox::from_id_salt("vpk_file")
+                    .width(260.0)
+                    .selected_text(vpks[self.vpk_pick].clone())
+                    .show_ui(ui, |ui| {
+                        for (i, v) in vpks.iter().enumerate() {
+                            if ui.selectable_label(i == file_pick, v).clicked() {
+                                file_pick = i;
+                            }
+                        }
+                    });
+                let vpk_hint = self.tl("vpk.filter");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.vpk_filter)
+                        .hint_text(vpk_hint)
+                        .desired_width(200.0),
+                );
+            });
+            if game_pick != self.vpk_game {
+                self.vpk_game = game_pick;
+                self.vpk_pick = 0;
+            } else {
+                self.vpk_pick = file_pick;
+            }
+
+            // (re)read the directory of the selected archive when it changes
+            let vpk_name = self.mounts[self.vpk_game].vpks[self.vpk_pick].clone();
+            let path = self
+                .paths()
+                .engine_root
+                .join(&self.mounts[self.vpk_game].dir)
+                .join(&vpk_name);
+            if !matches!(&self.vpk_cache, Some((p, _)) if *p == path) {
+                let res = vpk::read_directory(&path).map_err(|e| e.0);
+                self.vpk_cache = Some((path.clone(), res));
+            }
+            let Some((_, res)) = &self.vpk_cache else { return };
+            ui.add_space(6.0);
+            let listing = match res {
+                Ok(l) => l,
+                Err(e) => {
+                    widgets::status_text(ui, pal.err, e);
+                    return;
+                }
+            };
+            let summary = self.tf(
+                "vpk.summary",
+                &[
+                    ("n", &listing.entries.len().to_string()),
+                    ("size", &crate::explorer::human_size(listing.total_size)),
+                    ("v", &listing.version.to_string()),
+                ],
+            );
+            ui.label(RichText::new(summary).strong());
+            let needle = self.vpk_filter.trim().to_lowercase();
+            egui::ScrollArea::vertical()
+                .id_salt("vpk_entries")
+                .max_height(320.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let mut shown = 0usize;
+                    for e in &listing.entries {
+                        if !needle.is_empty() && !e.path.to_lowercase().contains(&needle) {
+                            continue;
+                        }
+                        shown += 1;
+                        if shown > 2000 {
+                            break;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.monospace(&e.path);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.weak(crate::explorer::human_size(e.size as u64));
+                            });
+                        });
+                    }
+                    if shown == 0 {
+                        ui.label(RichText::new(self.t("vpk.no_match")).color(pal.weak));
+                    }
+                });
+        });
+    }
+
     fn page_logs(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal;
         let sources: Vec<(String, PathBuf, bool)> = self
@@ -2329,6 +2608,7 @@ impl eframe::App for App {
             .show(ctx, |ui| match self.page {
                 // these two lay out their own panels and scroll areas
                 Page::Addons => self.page_addons(ui, ctx.clone()),
+                Page::Maps => self.page_maps(ui),
                 Page::Logs => self.page_logs(ui),
                 Page::Dumps => self.page_dumps(ui),
                 _ => {
@@ -2339,7 +2619,11 @@ impl eframe::App for App {
                             Page::Launch => self.page_launch(ui),
                             Page::Player => self.page_player(ui, ctx.clone()),
                             Page::Workshop => self.page_workshop(ui),
-                            Page::Mounts => self.page_mounts(ui),
+                            Page::Mounts => {
+                                self.page_mounts(ui);
+                                ui.add_space(8.0);
+                                self.page_vpk(ui);
+                            }
                             _ => self.page_about(ui),
                         });
                 }

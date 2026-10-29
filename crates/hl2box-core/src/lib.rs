@@ -27,6 +27,8 @@ pub mod search;
 pub mod lua;
 pub mod preview;
 pub mod tree;
+pub mod vpk;
+pub mod bsp;
 pub mod paths;
 pub mod steamid;
 pub mod version;
