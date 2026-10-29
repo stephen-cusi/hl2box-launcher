@@ -2097,8 +2097,15 @@ impl App {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let ent_text = match &info.entities {
-            EntityState::Stats(st) => self.tf("maps.entities_n", &[("n", &st.count.to_string())]),
-            EntityState::Compressed => self.tl("maps.entities_compressed"),
+            EntityState::Stats { stats, compressed } => {
+                let base = self.tf("maps.entities_n", &[("n", &stats.count.to_string())]);
+                if *compressed {
+                    format!("{base}  ({})", self.tl("maps.entities_lzma"))
+                } else {
+                    base
+                }
+            }
+            EntityState::Unreadable(e) => self.tf("maps.entities_unreadable", &[("e", e)]),
             EntityState::Empty => self.tl("maps.entities_none"),
         };
         let rows = vec![
@@ -2111,7 +2118,7 @@ impl App {
         widgets::kv_grid(ui, &pal, "map_meta", &rows);
         ui.add_space(8.0);
 
-        if let EntityState::Stats(st) = &info.entities {
+        if let EntityState::Stats { stats: st, .. } = &info.entities {
             if !st.classes.is_empty() {
                 widgets::section(ui, &pal, &self.tl("maps.classes"));
                 egui::Grid::new("map_classes").num_columns(2).spacing([18.0, 2.0]).show(ui, |ui| {
@@ -2124,6 +2131,57 @@ impl App {
                 ui.add_space(8.0);
             }
         }
+
+        if !info.game_lumps.is_empty() {
+            widgets::section(ui, &pal, &self.tl("maps.game_lumps"));
+            egui::Grid::new("map_game_lumps").num_columns(5).spacing([14.0, 2.0]).show(ui, |ui| {
+                for h in ["id", "version", "flags", "offset", "length"] {
+                    ui.label(RichText::new(h).color(pal.weak));
+                }
+                ui.end_row();
+                for g in &info.game_lumps {
+                    ui.monospace(&g.id);
+                    ui.monospace(g.version.to_string());
+                    ui.monospace(format!("0x{:04X}", g.flags));
+                    ui.monospace(format!("0x{:08X}", g.offset));
+                    ui.monospace(crate::explorer::human_size(g.length as u64));
+                    ui.end_row();
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        widgets::section(ui, &pal, &self.tl("maps.pakfile"));
+        match &info.pakfile {
+            None => {
+                ui.label(RichText::new(self.tl("maps.pak_none")).color(pal.weak));
+            }
+            Some(pak) => {
+                let summary = self.tf(
+                    "maps.pak_summary",
+                    &[
+                        ("n", &pak.count.to_string()),
+                        ("size", &crate::explorer::human_size(pak.total_size)),
+                    ],
+                );
+                ui.label(RichText::new(summary).strong());
+                egui::ScrollArea::vertical()
+                    .id_salt("map_pak_names")
+                    .max_height(180.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for e in pak.entries.iter().take(3000) {
+                            ui.horizontal(|ui| {
+                                ui.monospace(&e.name);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.weak(crate::explorer::human_size(e.size as u64));
+                                });
+                            });
+                        }
+                    });
+            }
+        }
+        ui.add_space(8.0);
 
         widgets::section(ui, &pal, &self.tl("maps.lump_table"));
         egui::ScrollArea::vertical()

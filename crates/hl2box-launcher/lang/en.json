@@ -305,5 +305,11 @@
   "vpk.none_files": "this game has no .vpk files",
   "vpk.filter": "filter paths...",
   "vpk.summary": "{{n}} files, {{size}} (VPK v{{v}})",
-  "vpk.no_match": "no path matches the filter"
+  "vpk.no_match": "no path matches the filter",
+  "maps.entities_lzma": "LZMA-compressed lump, decoded",
+  "maps.entities_unreadable": "compressed entity lump could not be decoded: {{e}}",
+  "maps.game_lumps": "game lumps (sprp = static props, dprp = detail props)",
+  "maps.pakfile": "embedded files (pakfile lump)",
+  "maps.pak_none": "no embedded files",
+  "maps.pak_summary": "{{n}} embedded files, {{size}} uncompressed"
 }

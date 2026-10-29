@@ -305,5 +305,11 @@
   "vpk.none_files": "这个游戏没有 .vpk 文件",
   "vpk.filter": "筛选路径...",
   "vpk.summary": "{{n}} 个文件，共 {{size}}（VPK v{{v}}）",
-  "vpk.no_match": "没有路径匹配筛选条件"
+  "vpk.no_match": "没有路径匹配筛选条件",
+  "maps.entities_lzma": "LZMA 压缩的 lump，已解压",
+  "maps.entities_unreadable": "无法解压压缩的实体 lump：{{e}}",
+  "maps.game_lumps": "game lump（sprp = 静态道具，dprp = 细节道具）",
+  "maps.pakfile": "内嵌文件（pakfile lump）",
+  "maps.pak_none": "没有内嵌文件",
+  "maps.pak_summary": "{{n}} 个内嵌文件，解压后共 {{size}}"
 }
